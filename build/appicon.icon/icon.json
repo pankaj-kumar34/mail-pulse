@@ -1,0 +1,19 @@
+{
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "appicon",
+          "name" : "appicon",
+          "position" : {
+            "scale" : 1.0,
+            "translation-in-points" : [0.0, 0.0]
+          }
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

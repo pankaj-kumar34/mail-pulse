@@ -1,0 +1,39 @@
+# ── Build output ──────────────────────────────────────────────────────────────
+bin/
+build/bin/
+mail-pulse
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend/dist/
+frontend/node_modules/
+frontend/bindings/
+frontend/.vite/
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+*.test
+*.out
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Task runner ───────────────────────────────────────────────────────────────
+.task/
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Wails auto-generated platform scaffolding (macOS-only app) ────────────────
+build/android/
+build/ios/
+build/linux/
+build/windows/
+build/docker/

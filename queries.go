@@ -19,27 +19,51 @@ func (s *logStore) getMetrics(since int64) Metrics {
 	defer s.mu.RUnlock()
 
 	var (
-		totalSent, totalDeferred, totalBounced, totalRemoved int
-		errorCount, warningCount                             int
-		delaySum, delayCount                                 float64
+		totalRemoved int
+		errorCount, warningCount int
+		delaySum, delayCount     float64
 		senderDomains    = make(map[string]int)
 		recipientDomains = make(map[string]int)
 		qmgrActive       = make(map[int64]int)
 		qmgrRemoved      = make(map[int64]int)
 	)
 
+	// Per queueID+recipient final status: priority sent > bounced > deferred.
+	// Key: "queueID|recipient" so each recipient of a multi-recipient message counts separately.
+	type qKey struct{ qid, to string }
+	const (
+		statusDeferred = 1
+		statusBounced  = 2
+		statusSent     = 3
+	)
+	qFinal := make(map[qKey]int)
+
 	for i := range s.logs {
 		e := &s.logs[i]
 		if since > 0 && e.Timestamp < since { continue }
 		if s.isNDR(e) { continue }
 
-		min1 := e.Timestamp / 60000
+		min1 := e.Timestamp / 300000 // 5-minute bucket
 		switch e.Status {
-		case "sent":     totalSent++
-		case "deferred": totalDeferred++
-		case "bounced":  totalBounced++
-		case "removed":  totalRemoved++; qmgrRemoved[min1]++
-		case "active":   qmgrActive[min1]++
+		case "sent":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusSent { qFinal[k] = statusSent }
+			}
+		case "deferred":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusDeferred { qFinal[k] = statusDeferred }
+			}
+		case "bounced":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusBounced { qFinal[k] = statusBounced }
+			}
+		case "removed":
+			totalRemoved++; qmgrRemoved[min1]++
+		case "active":
+			qmgrActive[min1]++
 		}
 		if e.IsError   { errorCount++ }
 		if e.IsWarning { warningCount++ }
@@ -49,6 +73,16 @@ func (s *logStore) getMetrics(since int64) Metrics {
 		if e.Delay > 0 && e.Delays != nil {
 			delayCount++
 			delaySum += e.Delay
+		}
+	}
+
+	// Count unique queue+recipient outcomes
+	var totalSent, totalDeferred, totalBounced int
+	for _, st := range qFinal {
+		switch st {
+		case statusSent:     totalSent++
+		case statusBounced:  totalBounced++
+		case statusDeferred: totalDeferred++
 		}
 	}
 
@@ -89,7 +123,7 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		if since > 0 && e.Timestamp < since { continue }
 		if s.isNDR(e) { continue }
 
-		hour1 := e.Timestamp / 3600000
+		hour1 := time.UnixMilli(e.Timestamp).Local().Truncate(time.Hour).Unix()
 		recip := extractDomain(e.To)
 		switch e.Status {
 		case "sent":
@@ -106,22 +140,23 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		}
 	}
 
-	// Hourly volume series
-	hourSet := make(map[int64]struct{})
-	for h := range sentByHour     { hourSet[h] = struct{}{} }
-	for h := range deferredByHour { hourSet[h] = struct{}{} }
-	for h := range bouncedByHour  { hourSet[h] = struct{}{} }
-	hours := make([]int64, 0, len(hourSet))
-	for h := range hourSet { hours = append(hours, h) }
-	sort.Slice(hours, func(i, j int) bool { return hours[i] < hours[j] })
-	hourly := make([]HourlyVolume, 0, len(hours))
-	for _, h := range hours {
-		hourly = append(hourly, HourlyVolume{
-			Hour:     h * 3600,
-			Sent:     sentByHour[h],
-			Deferred: deferredByHour[h],
-			Bounced:  bouncedByHour[h],
-		})
+	// Hourly volume series — emit ms timestamps, fill gaps with zeros
+	var minH, maxH int64
+	firstH := true
+	for h := range sentByHour     { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
+	for h := range deferredByHour { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
+	for h := range bouncedByHour  { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
+	var hourly []HourlyVolume
+	if !firstH {
+		const secPerHour = int64(3600)
+		for h := minH; h <= maxH; h += secPerHour {
+			hourly = append(hourly, HourlyVolume{
+				Hour:     h * 1000, // convert to milliseconds
+				Sent:     sentByHour[h],
+				Deferred: deferredByHour[h],
+				Bounced:  bouncedByHour[h],
+			})
+		}
 	}
 
 	// Reasons helper
@@ -151,6 +186,7 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		sent, deferred, bounced := domainSent[d], domainDeferred[d], domainBounced[d]
 		total := sent + deferred + bounced
 		if total < 5 { continue }
+		if deferred+bounced == 0 { continue } // exclude domains with no failures
 		failRate := float64(deferred+bounced) / float64(total) * 100
 		deliveries = append(deliveries, DomainDelivery{
 			Domain: d, Sent: sent, Deferred: deferred,
@@ -270,36 +306,38 @@ func (s *logStore) getDelayInsights(since int64) DelayInsights {
 }
 
 // getMessages returns grouped delivery rows (one per queue ID + recipient).
-func (s *logStore) getMessages(page, limit int, search, statusFilter, sortBy, sortOrder string) PaginatedMessages {
+func (s *logStore) getMessages(since int64, page, limit int, search, statusFilter, sortBy, sortOrder string) PaginatedMessages {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// First pass: collect from+firstSeen for every queue ID
+	// Single pass: collect qmap metadata and build delivery rows simultaneously.
+	// qmap is seeded from all logs (needed for from/firstSeen lookups across the
+	// full history), but rows are only emitted for entries within the time window.
 	type qmeta struct {
 		from      string
 		firstSeen int64
 	}
 	qmap := make(map[string]*qmeta, 1024)
+
+	// Pre-populate qmap from the full log so sender resolution works even when
+	// the "active" line is outside the requested time window.
 	for i := range s.logs {
 		e := &s.logs[i]
 		if e.QueueID == "" { continue }
-		if _, ok := qmap[e.QueueID]; !ok {
-			qmap[e.QueueID] = &qmeta{}
-		}
 		m := qmap[e.QueueID]
-		if e.From != "" && m.from == "" {
-			m.from = e.From
-		}
+		if m == nil { m = &qmeta{}; qmap[e.QueueID] = m }
+		if e.From != "" && m.from == "" { m.from = e.From }
 		if e.Status == "active" && (m.firstSeen == 0 || e.Timestamp < m.firstSeen) {
 			m.firstSeen = e.Timestamp
 		}
 	}
 
-	// Second pass: one row per smtp delivery line
+	// Collect delivery rows within the time window.
 	var rows []MessageRow
 	searchLow := strings.ToLower(search)
 	for i := range s.logs {
 		e := &s.logs[i]
+		if since > 0 && e.Timestamp < since { continue }
 		if e.QueueID == "" || e.To == "" { continue }
 		if e.Status == "" || e.Status == "active" || e.Status == "removed" { continue }
 		if s.isNDR(e) { continue }
@@ -329,21 +367,35 @@ func (s *logStore) getMessages(page, limit int, search, statusFilter, sortBy, so
 		rows = append(rows, row)
 	}
 
-	sort.SliceStable(rows, func(i, j int) bool {
-		a, b := rows[i], rows[j]
-		var less bool
-		switch sortBy {
-		case "queueId":     less = a.QueueID < b.QueueID
-		case "status":      less = a.Status < b.Status
-		case "from":        less = a.From < b.From
-		case "to":          less = a.To < b.To
-		case "delay":       less = a.Delay < b.Delay
-		case "processTime": less = a.ProcessTime < b.ProcessTime
-		default:            less = a.Time < b.Time
+	// Default is time-desc. Logs are chronological in store, so just reverse for free.
+	// Only pay O(n log n) when a non-time column is explicitly requested.
+	needsSort := sortBy != "" && sortBy != "time" && sortBy != "timestamp"
+	if !needsSort {
+		if sortOrder == "asc" {
+			// already chronological — nothing to do
+		} else {
+			// desc: reverse
+			for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
 		}
-		if sortOrder == "asc" { return less }
-		return !less
-	})
+	} else {
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i], rows[j]
+			var less bool
+			switch sortBy {
+			case "queueId":     less = a.QueueID < b.QueueID
+			case "status":      less = a.Status < b.Status
+			case "from":        less = a.From < b.From
+			case "to":          less = a.To < b.To
+			case "delay":       less = a.Delay < b.Delay
+			case "processTime": less = a.ProcessTime < b.ProcessTime
+			default:            less = a.Time < b.Time
+			}
+			if sortOrder == "asc" { return less }
+			return !less
+		})
+	}
 
 	total := len(rows)
 	totalPages := (total + limit - 1) / limit
@@ -364,13 +416,14 @@ func (s *logStore) getMessages(page, limit int, search, statusFilter, sortBy, so
 }
 
 // getPaginated returns all log entries with optional filtering and sorting.
-func (s *logStore) getPaginated(page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
+func (s *logStore) getPaginated(since int64, page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	searchLower := strings.ToLower(search)
 	filtered := make([]ParsedLogEntry, 0, len(s.logs))
 	for _, e := range s.logs {
+		if since > 0 && e.Timestamp < since { continue }
 		if status != "" && e.Status != status { continue }
 		if searchLower != "" {
 			if !strings.Contains(strings.ToLower(e.QueueID), searchLower) &&
@@ -383,18 +436,28 @@ func (s *logStore) getPaginated(page, limit int, search, status, sortBy, sortOrd
 		filtered = append(filtered, e)
 	}
 
-	sort.SliceStable(filtered, func(i, j int) bool {
-		var less bool
-		switch sortBy {
-		case "status": less = filtered[i].Status < filtered[j].Status
-		case "from":   less = filtered[i].From < filtered[j].From
-		case "to":     less = filtered[i].To < filtered[j].To
-		case "delay":  less = filtered[i].Delay < filtered[j].Delay
-		default:       less = filtered[i].Timestamp < filtered[j].Timestamp
+	// Logs are ingested in file order (chronological), so timestamp sort is free.
+	// Only sort when a non-timestamp column or reverse order is explicitly requested.
+	needsSort := sortBy != "" && sortBy != "timestamp"
+	if !needsSort && sortOrder == "desc" {
+		// Reverse in place — cheaper than sort.SliceStable for large slices.
+		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
 		}
-		if sortOrder == "desc" { return !less }
-		return less
-	})
+	} else if needsSort {
+		sort.SliceStable(filtered, func(i, j int) bool {
+			var less bool
+			switch sortBy {
+			case "status": less = filtered[i].Status < filtered[j].Status
+			case "from":   less = filtered[i].From < filtered[j].From
+			case "to":     less = filtered[i].To < filtered[j].To
+			case "delay":  less = filtered[i].Delay < filtered[j].Delay
+			default:       less = filtered[i].Timestamp < filtered[j].Timestamp
+			}
+			if sortOrder == "desc" { return !less }
+			return less
+		})
+	}
 
 	total := len(filtered)
 	totalPages := (total + limit - 1) / limit
@@ -415,12 +478,13 @@ func (s *logStore) getPaginated(page, limit int, search, status, sortBy, sortOrd
 }
 
 // getErrorsPaginated returns error/warning entries with optional type filter.
-func (s *logStore) getErrorsPaginated(page, limit int, errType, sortOrder string) PaginatedLogs {
+func (s *logStore) getErrorsPaginated(since int64, page, limit int, errType, sortOrder string) PaginatedLogs {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	filtered := make([]ParsedLogEntry, 0)
 	for _, e := range s.logs {
+		if since > 0 && e.Timestamp < since { continue }
 		if !e.IsError && !e.IsWarning { continue }
 		switch errType {
 		case "errors":
@@ -431,10 +495,13 @@ func (s *logStore) getErrorsPaginated(page, limit int, errType, sortOrder string
 		filtered = append(filtered, e)
 	}
 
-	sort.SliceStable(filtered, func(i, j int) bool {
-		if sortOrder == "asc" { return filtered[i].Timestamp < filtered[j].Timestamp }
-		return filtered[i].Timestamp > filtered[j].Timestamp
-	})
+	// Errors are collected in ingestion (chronological) order.
+	// desc is the common case — reverse in place rather than sorting.
+	if sortOrder != "asc" {
+		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		}
+	}
 
 	total := len(filtered)
 	totalPages := (total + limit - 1) / limit
@@ -1003,8 +1070,8 @@ func (s *logStore) getHeatmap(since int64) []HeatmapCell {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	type key struct{ date string; hour int }
-	type cell struct{ sent, defer_, bounce int }
+	type key struct{ dateEpoch int64; hour int }
+	type cell struct{ date string; sent, defer_, bounce int }
 	grid := make(map[key]*cell)
 
 	for i := range s.logs {
@@ -1013,10 +1080,12 @@ func (s *logStore) getHeatmap(since int64) []HeatmapCell {
 		if s.isNDR(e) { continue }
 		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
 
-		t := time.UnixMilli(e.Timestamp)
-		k := key{date: t.Format("Jan 02"), hour: t.Hour()}
+		t := time.UnixMilli(e.Timestamp).Local()
+		// midnight of the local date as epoch ms — unambiguous sort key
+		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+		k := key{dateEpoch: midnight.UnixMilli(), hour: t.Hour()}
 		c := grid[k]
-		if c == nil { c = &cell{}; grid[k] = c }
+		if c == nil { c = &cell{date: t.Format("Jan 02")}; grid[k] = c }
 		switch e.Status {
 		case "sent":     c.sent++
 		case "deferred": c.defer_++
@@ -1027,16 +1096,18 @@ func (s *logStore) getHeatmap(since int64) []HeatmapCell {
 	out := make([]HeatmapCell, 0, len(grid))
 	for k, c := range grid {
 		out = append(out, HeatmapCell{
-			Date:   k.date,
-			Hour:   k.hour,
-			Sent:   c.sent,
-			Defer:  c.defer_,
-			Bounce: c.bounce,
-			Total:  c.sent + c.defer_ + c.bounce,
+			Date:      c.date,
+			DateEpoch: k.dateEpoch,
+			Hour:      k.hour,
+			Sent:      c.sent,
+			Defer:     c.defer_,
+			Bounce:    c.bounce,
+			Total:     c.sent + c.defer_ + c.bounce,
 		})
 	}
+	// Sort by epoch ms then hour — correct across month and year boundaries.
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Date != out[j].Date { return out[i].Date < out[j].Date }
+		if out[i].DateEpoch != out[j].DateEpoch { return out[i].DateEpoch < out[j].DateEpoch }
 		return out[i].Hour < out[j].Hour
 	})
 	return out

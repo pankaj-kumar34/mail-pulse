@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Search, ChevronLeft, ChevronRight, Loader2, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
+import { EmptyState } from "./EmptyState";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/badge";
@@ -46,7 +47,7 @@ function fmtDelay(s: number): string {
   return `${m}m ${sec}s`;
 }
 
-export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: number; initialStatus?: string }) {
+export function ActivityTable({ refreshKey, sinceHours = 0, initialStatus = "", filterSeq = 0 }: { refreshKey: number; sinceHours?: number; initialStatus?: string; filterSeq?: number }) {
   const [rows, setRows]              = useState<MessageRow[]>([]);
   const [pagination, setPagination]  = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
   const [search, setSearch]          = useState("");
@@ -56,17 +57,17 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
   const [loading, setLoading]        = useState(false);
 
   // Sync status when parent navigates here with a new filter
-  useEffect(() => { setStatus(initialStatus); }, [initialStatus]);
+  useEffect(() => { setStatus(initialStatus); }, [initialStatus, filterSeq]);
 
   const fetchRows = useCallback(async (page: number) => {
     setLoading(true);
     try {
-      const r = await LogService.GetMessages(page, 50, search, status, sortBy, sortOrder) as any;
+      const r = await LogService.GetMessages(sinceHours, page, 50, search, status, sortBy, sortOrder) as any;
       setRows(r.rows ?? []);
       setPagination(r.pagination ?? { page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, [search, status, sortBy, sortOrder]);
+  }, [sinceHours, search, status, sortBy, sortOrder]);
 
   useEffect(() => { if (refreshKey === 0) return; fetchRows(1); }, [fetchRows, refreshKey]);
 
@@ -92,10 +93,10 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
       <div className="px-5 py-3 shrink-0 flex items-center gap-3"
         style={{ borderBottom: "1px solid #e4e4e7" }}>
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none"
             style={{ color: "#a1a1aa" }} />
           <Input placeholder="Search queue ID, sender, recipient…" value={search}
-            onChange={e => setSearch(e.target.value)} className="pl-8" />
+            onChange={e => setSearch(e.target.value)} className="pl-10" />
         </div>
         <NativeSelect value={status} onChange={e => setStatus(e.target.value)}>
           <option value="">All statuses</option>
@@ -132,8 +133,8 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
                 <Loader2 className="w-5 h-5 animate-spin mx-auto" style={{ color: "#d4d4d8" }} />
               </td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={6} className="py-16 text-center text-sm" style={{ color: "#a1a1aa" }}>
-                No messages found
+              <tr><td colSpan={6} className="py-2">
+                <EmptyState icon="mail" title="No messages found" subtitle="Try adjusting your filters" compact />
               </td></tr>
             ) : rows.map((row, i) => (
               <tr key={`${row.queueId}-${row.to}-${i}`}
@@ -146,7 +147,7 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
                 </td>
 
                 {/* Queue ID */}
-                <td className="px-4 py-2.5 font-mono text-xs" style={{ color: "#18181b" }}>
+                <td className="px-4 py-2.5 font-mono text-xs" style={{ color: "#3f3f46" }}>
                   {row.queueId || "—"}
                 </td>
 
@@ -163,7 +164,7 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
                 </td>
 
                 {/* To */}
-                <td className="px-4 py-2.5 text-xs truncate" style={{ color: "#18181b" }}>
+                <td className="px-4 py-2.5 text-xs truncate" style={{ color: "#3f3f46" }}>
                   {maskEmail(row.to)}
                 </td>
 

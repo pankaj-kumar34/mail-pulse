@@ -1,3 +1,5 @@
+import { EmptyState } from "./EmptyState";
+
 interface DomainCount { domain: string; count: number }
 
 // Log scale so small values still show a meaningful bar
@@ -21,7 +23,7 @@ export function TopDomainsTable({ data, title, color, maxHeight }: {
     <div style={{ background: "#fff", borderRadius: "12px", border: "1px solid #e4e4e7", boxShadow: "none", display: "flex", flexDirection: "column", overflow: "hidden", height: "100%" }}>
 
       <div style={{ padding: "16px 20px", borderBottom: "1px solid #f4f4f5", flexShrink: 0 }}>
-        <p style={{ fontSize: "13px", fontWeight: 600, color: "#18181b", margin: 0 }}>{title}</p>
+        <p style={{ fontSize: "13px", fontWeight: 600, color: "#3f3f46", margin: 0 }}>{title}</p>
         <p style={{ fontSize: "11px", color: "#a1a1aa", margin: "2px 0 0 0" }}>Top 20 domains by message count</p>
       </div>
 
@@ -38,7 +40,7 @@ export function TopDomainsTable({ data, title, color, maxHeight }: {
           </thead>
           <tbody>
             {data.length === 0 ? (
-              <tr><td colSpan={4} style={{ padding: "40px", textAlign: "center", color: "#a1a1aa", fontSize: "13px" }}>No data</td></tr>
+              <tr><td colSpan={4}><EmptyState icon="inbox" title="No data" compact /></td></tr>
             ) : data.map((d, i) => {
               const pct = total > 0 ? (d.count / total) * 100 : 0;
               const bw  = barWidth(d.count, max);
@@ -47,7 +49,7 @@ export function TopDomainsTable({ data, title, color, maxHeight }: {
                   onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = "#fafafa"}
                   onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = "transparent"}>
                   <td style={{ padding: "9px 16px", color: "#a1a1aa", fontSize: "12px", fontVariantNumeric: "tabular-nums" }}>{i + 1}</td>
-                  <td style={{ padding: "9px 16px", fontWeight: 500, color: "#18181b", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.domain}</td>
+                  <td style={{ padding: "9px 16px", fontWeight: 400, color: "#52525b", maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.domain}</td>
                   <td style={{ padding: "9px 16px", textAlign: "right" }}>
                     <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "1px 8px", borderRadius: "999px", fontSize: "11px", fontWeight: 600, fontVariantNumeric: "tabular-nums", background: badgeBg, color: badgeText }}>
                       {d.count.toLocaleString()}

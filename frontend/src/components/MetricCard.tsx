@@ -42,7 +42,7 @@ export function MetricCard({ title, value, icon: Icon, color, suffix, subtitle, 
             {title}
           </p>
         </div>
-        <p style={{ fontSize: "22px", fontWeight: 700, color: "#18181b", lineHeight: 1, fontVariantNumeric: "tabular-nums", margin: 0 }}>
+        <p style={{ fontSize: "22px", fontWeight: 700, color: "#3f3f46", lineHeight: 1, fontVariantNumeric: "tabular-nums", margin: 0 }}>
           {display}
         </p>
         {subtitle && (

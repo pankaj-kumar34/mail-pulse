@@ -67,7 +67,7 @@ export function RecipientDrilldownPanel({ domain, sinceHours, onClose }: Props) 
         }}>
           <ArrowLeft size={13} /> Back
         </button>
-        <span style={{ fontSize: "13px", fontWeight: 600, color: "#18181b", flex: 1 }}>{domain}</span>
+        <span style={{ fontSize: "13px", fontWeight: 600, color: "#3f3f46", flex: 1 }}>{domain}</span>
         {data && (
           <span style={{ fontSize: "11px", color: "#a1a1aa" }}>
             {data.total.toLocaleString()} deliveries · {data.failRate.toFixed(1)}% fail rate

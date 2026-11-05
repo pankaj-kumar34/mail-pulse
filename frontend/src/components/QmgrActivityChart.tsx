@@ -1,8 +1,10 @@
+import { useState } from "react";
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Legend, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, BarChart, Bar, Area, AreaChart,
 } from "recharts";
 import { format } from "date-fns";
+import { EmptyState } from "./EmptyState";
 import { TrendingUp, TrendingDown, Activity, Minus } from "lucide-react";
 
 interface TimeSeriesPoint { timestamp: number; value: number }
@@ -22,6 +24,9 @@ export function QmgrActivityChart({
   activeData: TimeSeriesPoint[];
   removedData: TimeSeriesPoint[];
 }) {
+  const [showActive,  setShowActive]  = useState(true);
+  const [showRemoved, setShowRemoved] = useState(true);
+
   const map = new Map<number, Record<string, number>>();
   activeData.forEach(({ timestamp, value }) => {
     if (!map.has(timestamp)) map.set(timestamp, { timestamp });
@@ -32,41 +37,50 @@ export function QmgrActivityChart({
     map.get(timestamp)!.removed = value;
   });
 
-  const data = Array.from(map.values())
+  type RawPoint = { timestamp: number; active?: number; removed?: number };
+  // Backend bucketed to 5-min intervals — use directly, no re-bucketing needed
+  const data = (Array.from(map.values()) as RawPoint[])
     .sort((a, b) => a.timestamp - b.timestamp)
-    .map(d => ({ ...d, label: format(new Date(d.timestamp), "HH:mm") }));
+    .map(d => ({
+      timestamp: d.timestamp,
+      active:    d.active  ?? 0,
+      removed:   d.removed ?? 0,
+      label:     format(new Date(d.timestamp), "HH:mm"),
+    }));
 
   if (data.length === 0) return (
-    <div className="h-full flex items-center justify-center text-zinc-400 text-sm">No qmgr data</div>
+    <div className="h-full flex items-center justify-center"><EmptyState icon="chart" title="No qmgr data" subtitle="Load a log file to see queue activity" fill /></div>
   );
 
-  const totalActive  = activeData.reduce((s, p) => s + p.value, 0);
-  const totalRemoved = removedData.reduce((s, p) => s + p.value, 0);
-  const peakActive   = Math.max(...activeData.map(p => p.value));
-  const peakRemoved  = Math.max(...removedData.map(p => p.value));
-  const avgActive    = activeData.length ? (totalActive / activeData.length).toFixed(1) : "0";
-  const avgRemoved   = removedData.length ? (totalRemoved / removedData.length).toFixed(1) : "0";
+  const totalActive  = data.reduce((s, p) => s + p.active,  0);
+  const totalRemoved = data.reduce((s, p) => s + p.removed, 0);
+  const peakActive   = data.length ? data.reduce((m, p) => Math.max(m, p.active),  0) : 0;
+  const peakRemoved  = data.length ? data.reduce((m, p) => Math.max(m, p.removed), 0) : 0;
+  const avgActive    = data.length ? (totalActive  / data.length).toFixed(1) : "0";
+  const avgRemoved   = data.length ? (totalRemoved / data.length).toFixed(1) : "0";
 
-  // Hourly bar data — bucket by hour
-  const hourMap = new Map<string, { active: number; removed: number }>();
+  // Hourly bar data — bucket by local hour, sort chronologically
+  const hourMap = new Map<number, { label: string; active: number; removed: number }>();
   data.forEach(d => {
-    const hr = format(new Date((d as any).timestamp), "HH:00");
-    if (!hourMap.has(hr)) hourMap.set(hr, { active: 0, removed: 0 });
-    const b = hourMap.get(hr)!;
-    b.active  += (d as any).active  ?? 0;
-    b.removed += (d as any).removed ?? 0;
+    const date = new Date(d.timestamp);
+    // floor to start of local hour as epoch ms
+    const hourEpoch = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).getTime();
+    if (!hourMap.has(hourEpoch)) hourMap.set(hourEpoch, { label: format(date, "HH:00"), active: 0, removed: 0 });
+    const b = hourMap.get(hourEpoch)!;
+    b.active  += d.active;
+    b.removed += d.removed;
   });
   const hourlyData = Array.from(hourMap.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([label, vals]) => ({ label, ...vals }));
+    .sort((a, b) => a[0] - b[0])
+    .map(([, vals]) => vals);
 
   const statCards = [
-    { label: "Total Active",   value: totalActive.toLocaleString(),  icon: Activity,     color: "text-emerald-600", bg: "bg-emerald-50",  border: "border-emerald-100" },
-    { label: "Total Removed",  value: totalRemoved.toLocaleString(), icon: TrendingDown, color: "text-blue-600",    bg: "bg-blue-50",     border: "border-blue-100"    },
-    { label: "Peak Active",    value: peakActive.toString(),         icon: TrendingUp,   color: "text-amber-600",   bg: "bg-amber-50",    border: "border-amber-100"   },
-    { label: "Peak Removed",   value: peakRemoved.toString(),        icon: TrendingUp,   color: "text-purple-600",  bg: "bg-purple-50",   border: "border-purple-100"  },
-    { label: "Avg Active/min", value: avgActive,                     icon: Minus,        color: "text-zinc-600",    bg: "bg-zinc-50",     border: "border-zinc-200"    },
-    { label: "Avg Removed/min",value: avgRemoved,                    icon: Minus,        color: "text-zinc-600",    bg: "bg-zinc-50",     border: "border-zinc-200"    },
+    { label: "Total Active",    value: totalActive.toLocaleString(),  icon: Activity,     color: "text-blue-600",    bg: "bg-blue-50",     border: "border-blue-100"    },
+    { label: "Total Removed",   value: totalRemoved.toLocaleString(), icon: TrendingDown, color: "text-emerald-600", bg: "bg-emerald-50",  border: "border-emerald-100" },
+    { label: "Peak Active",     value: peakActive.toString(),         icon: TrendingUp,   color: "text-amber-600",   bg: "bg-amber-50",    border: "border-amber-100"   },
+    { label: "Peak Removed",    value: peakRemoved.toString(),        icon: TrendingUp,   color: "text-purple-600",  bg: "bg-purple-50",   border: "border-purple-100"  },
+    { label: "Avg Active/5min",  value: avgActive,                     icon: Minus,        color: "text-zinc-600",    bg: "bg-zinc-50",     border: "border-zinc-200"    },
+    { label: "Avg Removed/5min", value: avgRemoved,                    icon: Minus,        color: "text-zinc-600",    bg: "bg-zinc-50",     border: "border-zinc-200"    },
   ];
 
   return (
@@ -89,30 +103,56 @@ export function QmgrActivityChart({
 
       {/* Main area chart */}
       <div className="flex-1 min-h-0 rounded-xl border border-zinc-100 bg-white flex flex-col">
-        <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
-          <h3 className="text-sm font-semibold text-zinc-900">Activity Over Time</h3>
-          <p className="text-xs mt-0.5 text-zinc-400">Active vs removed messages per minute</p>
+        <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-800">Activity Over Time</h3>
+            <p className="text-xs mt-0.5 text-zinc-400">Active vs removed messages per 5 minutes</p>
+          </div>
+          {/* Toggle pills */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowActive(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+                showActive
+                  ? "bg-blue-50 border-blue-200 text-blue-700"
+                  : "bg-white border-zinc-200 text-zinc-400"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${showActive ? "bg-blue-500" : "bg-zinc-300"}`} />
+              Active
+            </button>
+            <button
+              onClick={() => setShowRemoved(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-all ${
+                showRemoved
+                  ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                  : "bg-white border-zinc-200 text-zinc-400"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${showRemoved ? "bg-emerald-500" : "bg-zinc-300"}`} />
+              Removed
+            </button>
+          </div>
         </div>
         <div className="flex-1 min-h-0 p-4">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data} margin={{ top: 4, right: 8, left: 10, bottom: 0 }}>
+            <AreaChart data={data} margin={{ top: 4, right: 8, left: 10, bottom: 20 }}>
               <defs>
-                <linearGradient id="activeGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#10b981" stopOpacity={0.15} />
-                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="removedGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.15} />
+                <linearGradient id="gradActive" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.12} />
                   <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="gradRemoved" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#10b981" stopOpacity={0.12} />
+                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#f4f4f5" vertical={false} />
               <XAxis dataKey="label" tick={{ fill: "#a1a1aa", fontSize: 11 }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-              <YAxis tick={{ fill: "#a1a1aa", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`} />
+              <YAxis tick={{ fill: "#a1a1aa", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`} domain={[0, "auto"]} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: "#e4e4e7" }} />
-              <Legend wrapperStyle={{ fontSize: 12, color: "#a1a1aa", paddingTop: 8 }} />
-              <Area type="monotone" dataKey="active"  name="Active"  stroke="#10b981" fill="url(#activeGrad)"  strokeWidth={1.5} dot={false} />
-              <Area type="monotone" dataKey="removed" name="Removed" stroke="#3b82f6" fill="url(#removedGrad)" strokeWidth={1.5} dot={false} />
+              {showActive  && <Area type="monotone" dataKey="active"  name="Active"  stroke="#3b82f6" strokeWidth={2} fill="url(#gradActive)"  dot={false} connectNulls={true} isAnimationActive={false} />}
+              {showRemoved && <Area type="monotone" dataKey="removed" name="Removed" stroke="#10b981" strokeWidth={2} fill="url(#gradRemoved)" dot={false} connectNulls={true} isAnimationActive={false} />}
             </AreaChart>
           </ResponsiveContainer>
         </div>
@@ -122,7 +162,7 @@ export function QmgrActivityChart({
       {hourlyData.length > 1 && (
         <div className="rounded-xl border border-zinc-100 bg-white shrink-0">
           <div className="px-5 py-3.5 border-b border-zinc-100">
-            <h3 className="text-sm font-semibold text-zinc-900">Hourly Breakdown</h3>
+            <h3 className="text-sm font-semibold text-zinc-800">Hourly Breakdown</h3>
             <p className="text-xs mt-0.5 text-zinc-400">Total messages active/removed per hour</p>
           </div>
           <div className="p-4">
@@ -132,9 +172,8 @@ export function QmgrActivityChart({
                 <XAxis dataKey="label" tick={{ fill: "#a1a1aa", fontSize: 11 }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fill: "#a1a1aa", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => v >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`} />
                 <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "#f9f9f9" }} />
-                <Legend wrapperStyle={{ fontSize: 12, color: "#a1a1aa", paddingTop: 4 }} />
-                <Bar dataKey="active"  name="Active"  fill="#10b981" radius={[3, 3, 0, 0]} />
-                <Bar dataKey="removed" name="Removed" fill="#3b82f6" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="active"  name="Active"  fill="#3b82f6" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="removed" name="Removed" fill="#10b981" radius={[3, 3, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>

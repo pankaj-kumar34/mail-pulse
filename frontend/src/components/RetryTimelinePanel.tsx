@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Search, ChevronRight, Clock, CheckCircle2, XCircle, RefreshCw } from "lucide-react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
 import { EmptyState } from "./EmptyState";
+import { Input } from "@/components/ui/input";
 
 interface RetryAttempt {
   timestamp: number;
@@ -22,6 +23,7 @@ interface RetryTimeline {
 
 interface Props {
   sinceHours: number;
+  refreshKey?: number;
 }
 
 function fmtTime(ms: number) {
@@ -114,7 +116,7 @@ function TimelineView({ timeline, onBack }: { timeline: RetryTimeline; onBack: (
   );
 }
 
-export function RetryTimelinePanel({ sinceHours }: Props) {
+export function RetryTimelinePanel({ sinceHours, refreshKey }: Props) {
   const [queues, setQueues] = useState<string[]>([]);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<RetryTimeline | null>(null);
@@ -126,7 +128,7 @@ export function RetryTimelinePanel({ sinceHours }: Props) {
       .catch(() => setQueues([]));
     setSelected(null);
     setSearch("");
-  }, [sinceHours]);
+  }, [sinceHours, refreshKey]);
 
   const open = useCallback((queueId: string) => {
     setLoading(true);
@@ -144,12 +146,12 @@ export function RetryTimelinePanel({ sinceHours }: Props) {
       {/* Search */}
       <div className="shrink-0 px-4 py-3 border-b border-zinc-100">
         <div className="relative">
-          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
-          <input
-            className="w-full pl-7 pr-3 py-1.5 text-xs border border-zinc-200 rounded-lg bg-white focus:outline-none focus:ring-1 focus:ring-zinc-300"
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: "#a1a1aa" }} />
+          <Input
             placeholder="Search queue ID…"
             value={search}
             onChange={e => setSearch(e.target.value)}
+            className="pl-10"
           />
         </div>
         <div className="text-xs text-zinc-400 mt-1.5">Top {queues.length} most-retried queues</div>

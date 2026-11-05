@@ -52,7 +52,7 @@ type DeferReason struct {
 }
 
 type HourlyVolume struct {
-	Hour     int64 `json:"hour"`     // unix timestamp of hour start (seconds)
+	Hour     int64 `json:"hour"`     // unix timestamp of hour start (milliseconds)
 	Sent     int   `json:"sent"`
 	Deferred int   `json:"deferred"`
 	Bounced  int   `json:"bounced"`
@@ -296,12 +296,13 @@ type IPReputationReport struct {
 
 // HeatmapCell is one cell in the hourly volume heatmap.
 type HeatmapCell struct {
-	Date  string `json:"date"`  // "Nov 03"
-	Hour  int    `json:"hour"`
-	Sent  int    `json:"sent"`
-	Defer int    `json:"defer"`
-	Bounce int   `json:"bounce"`
-	Total int    `json:"total"`
+	Date      string `json:"date"`      // "Nov 03" — display only
+	DateEpoch int64  `json:"dateEpoch"` // unix ms of midnight for correct chronological sort
+	Hour      int    `json:"hour"`
+	Sent      int    `json:"sent"`
+	Defer     int    `json:"defer"`
+	Bounce    int    `json:"bounce"`
+	Total     int    `json:"total"`
 }
 
 // RetryAttempt is one delivery attempt for a queue ID.

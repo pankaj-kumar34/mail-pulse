@@ -3,12 +3,15 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // ──────────────────────────────────────────────
@@ -124,10 +127,34 @@ func findLogsDir() string {
 	return filepath.Join(home, ".mail-pulse", "logs")
 }
 
+func prefsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".mail-pulse", "prefs.json")
+}
+
+func loadSelectedFile() string {
+	data, err := os.ReadFile(prefsPath())
+	if err != nil {
+		return "mail.0.log"
+	}
+	var prefs struct {
+		SelectedFile string `json:"selected_file"`
+	}
+	if err := json.Unmarshal(data, &prefs); err != nil || prefs.SelectedFile == "" {
+		return "mail.0.log"
+	}
+	return prefs.SelectedFile
+}
+
+func saveSelectedFile(file string) {
+	data, _ := json.Marshal(map[string]string{"selected_file": file})
+	_ = os.WriteFile(prefsPath(), data, 0644)
+}
+
 func NewLogService() *LogService {
 	return &LogService{
 		store:        newLogStore(),
-		selectedFile: "mail.0.log",
+		selectedFile: loadSelectedFile(),
 		logsDir:      findLogsDir(),
 	}
 }
@@ -176,24 +203,54 @@ func (l *LogService) IngestFile() map[string]interface{} {
 	filePath := filepath.Join(l.logsDir, l.selectedFile)
 	l.mu.Unlock()
 
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return map[string]interface{}{"ingested": false, "status": "file_not_found"}
+	}
+	fileSize := info.Size()
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return map[string]interface{}{"ingested": false, "status": "file_not_found"}
 	}
 	defer f.Close()
 
+	emit := func(pct int, msg string) {
+		if app := application.Get(); app != nil {
+			app.Event.Emit("ingest:progress", map[string]interface{}{"pct": pct, "msg": msg})
+		}
+	}
+
+	emit(0, "Starting…")
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	var bytesRead int64
+	lastPct := 0
+	// State for year-boundary detection across log lines (Dec→Jan crossing).
+	var prevMonth int
+	var yearOffset int
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+		raw := scanner.Bytes()
+		bytesRead += int64(len(raw)) + 1 // +1 for newline
+		line := strings.TrimSpace(string(raw))
+		if line != "" {
+			// Pass state pointers so parser can track month regression across lines.
+			if e := parsePostfixLogWithState(line, &prevMonth, &yearOffset); e != nil {
+				l.store.add(e)
+			}
 		}
-		if e := parsePostfixLog(line); e != nil {
-			l.store.add(e)
+		if fileSize > 0 {
+			pct := int(bytesRead * 100 / fileSize)
+			if pct != lastPct && pct%5 == 0 { // emit every 5%
+				emit(pct, "Parsing…")
+				lastPct = pct
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		emit(100, "Error")
 		return map[string]interface{}{"ingested": false, "status": "scan_error", "error": err.Error()}
 	}
 
@@ -202,6 +259,7 @@ func (l *LogService) IngestFile() map[string]interface{} {
 	sel := l.selectedFile
 	l.mu.Unlock()
 
+	emit(100, "Done")
 	return map[string]interface{}{"ingested": true, "status": "complete", "selectedFile": sel}
 }
 
@@ -209,6 +267,7 @@ func (l *LogService) RefreshFile(filename string) map[string]interface{} {
 	l.mu.Lock()
 	if filename != "" {
 		l.selectedFile = filename
+		saveSelectedFile(filename)
 	}
 	l.ingested = false
 	l.mu.Unlock()
@@ -259,16 +318,28 @@ func (l *LogService) GetLogTimeRange() map[string]int64 {
 
 // ── Data Access ───────────────────────────────────────────────────────────────
 
-func (l *LogService) GetActivity(page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
-	return l.store.getPaginated(page, limit, search, status, sortBy, sortOrder)
+func (l *LogService) GetActivity(sinceHours, page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
+	since := int64(0)
+	if sinceHours > 0 {
+		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+	}
+	return l.store.getPaginated(since, page, limit, search, status, sortBy, sortOrder)
 }
 
-func (l *LogService) GetMessages(page, limit int, search, status, sortBy, sortOrder string) PaginatedMessages {
-	return l.store.getMessages(page, limit, search, status, sortBy, sortOrder)
+func (l *LogService) GetMessages(sinceHours, page, limit int, search, status, sortBy, sortOrder string) PaginatedMessages {
+	since := int64(0)
+	if sinceHours > 0 {
+		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+	}
+	return l.store.getMessages(since, page, limit, search, status, sortBy, sortOrder)
 }
 
-func (l *LogService) GetErrors(page, limit int, errType, sortOrder string) PaginatedLogs {
-	return l.store.getErrorsPaginated(page, limit, errType, sortOrder)
+func (l *LogService) GetErrors(sinceHours, page, limit int, errType, sortOrder string) PaginatedLogs {
+	since := int64(0)
+	if sinceHours > 0 {
+		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+	}
+	return l.store.getErrorsPaginated(since, page, limit, errType, sortOrder)
 }
 
 func (l *LogService) GetRecipientDrilldown(domain string, sinceHours int) RecipientDrilldown {

@@ -24,7 +24,17 @@ var delaysPattern = regexp.MustCompile(`delays=([\d.]+)\/([\d.]+)\/([\d.]+)\/([\
 var sizePattern  = regexp.MustCompile(`size=(\d+)`)
 var nrcptPattern = regexp.MustCompile(`nrcpt=(\d+)`)
 
+// parsePostfixLog parses a single log line. For multi-line files spanning year boundaries,
+// use parsePostfixLogWithState which tracks month regression (Dec→Jan) to detect year crossings.
 func parsePostfixLog(rawLog string) *ParsedLogEntry {
+	return parsePostfixLogWithState(rawLog, nil, nil)
+}
+
+// parsePostfixLogWithState parses a log line with optional state tracking for year boundaries.
+// prevMonth: pointer to previous line's month (1-12), updated on success.
+// yearOffset: pointer to cumulative year offset from base year, updated when Dec→Jan crossing detected.
+// Base year defaults to current UTC year; caller can pre-set yearOffset if file mtime suggests a different base.
+func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *ParsedLogEntry {
 	if !strings.Contains(rawLog, "postfix/qmgr[") &&
 		!strings.Contains(rawLog, "postfix/smtp[") &&
 		!strings.Contains(rawLog, "postfix/error[") {
@@ -40,18 +50,42 @@ func parsePostfixLog(rawLog string) *ParsedLogEntry {
 	service := match[3]
 	message := match[5]
 
-	year := time.Now().UTC().Year()
-	ts, err := time.Parse("Jan  2 15:04:05 UTC 2006", fmt.Sprintf("%s UTC %d", timestampStr, year))
+	baseYear := time.Now().UTC().Year()
+	if yearOffset != nil {
+		baseYear += *yearOffset
+	}
+	ts, err := time.Parse("Jan  2 15:04:05 UTC 2006", fmt.Sprintf("%s UTC %d", timestampStr, baseYear))
 	if err != nil {
-		ts, err = time.Parse("Jan 2 15:04:05 UTC 2006", fmt.Sprintf("%s UTC %d", timestampStr, year))
+		ts, err = time.Parse("Jan 2 15:04:05 UTC 2006", fmt.Sprintf("%s UTC %d", timestampStr, baseYear))
 		if err != nil {
 			return nil
 		}
 	}
 
-	// If parsed timestamp is in the future by more than a day, it's last year's log
+	// Detect Dec→Jan month regression to handle year boundary crossings without relying on wall clock.
+	// If we have previous month and current month is January (1) while previous was December (12),
+	// we've crossed into the next year.
+	thisMonth := int(ts.Month())
+	if prevMonth != nil && *prevMonth == 12 && thisMonth == 1 {
+		if yearOffset != nil {
+			*yearOffset++
+		}
+		ts = ts.AddDate(1, 0, 0)
+	}
+	if prevMonth != nil {
+		*prevMonth = thisMonth
+	}
+
+	// Fallback: if still in future by >24h (e.g., first line of old log parsed with current year),
+	// roll back one year. This handles the case where state tracking isn't used or first line is Dec.
 	if time.Until(ts) > 24*time.Hour {
 		ts = ts.AddDate(-1, 0, 0)
+		if prevMonth != nil {
+			*prevMonth = int(ts.Month())
+		}
+		if yearOffset != nil {
+			*yearOffset--
+		}
 	}
 
 	msgLower := strings.ToLower(message)
@@ -229,6 +263,7 @@ var deferRules = []reasonRule{
 
 var bounceRules = []reasonRule{
 	{reason: "Unknown user (5.1.1)",        anyOf: []string{"5.1.1", "user unknown", "no such user"}},
+	{reason: "Mailbox not found (5.0.0)",   anyOf: []string{"mailbox not found", "552", "requested mail action aborted"}},
 	{reason: "Inactive account (5.2.1)",    anyOf: []string{"5.2.1", "inactive", "disabled"}},
 	{reason: "Mailbox full (5.2.2)",        anyOf: []string{"5.2.2", "over quota", "mailbox full"}},
 	{reason: "Address rejected (5.4.1)",    anyOf: []string{"5.4.1", "access denied", "mailbox unavailable"}},

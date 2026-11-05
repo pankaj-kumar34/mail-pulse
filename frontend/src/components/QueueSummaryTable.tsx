@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Search, ChevronDown, ChevronRight, Users } from "lucide-react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
 import { EmptyState } from "./EmptyState";
+import { Input } from "@/components/ui/input";
 
 interface QueueSummary {
   timestamp: number;
@@ -63,7 +64,7 @@ export function QueueSummaryTable({ sinceHours, refreshKey }: Props) {
       .catch(() => { setRows([]); setLoading(false); });
   }, [sinceHours]);
 
-  useEffect(() => { load(); }, [load, refreshKey]);
+  useEffect(() => { load(); }, [load, sinceHours, refreshKey]);
 
   const toggleRow = (qid: string) => {
     setExpandedRows(prev => {
@@ -89,20 +90,20 @@ export function QueueSummaryTable({ sinceHours, refreshKey }: Props) {
       {/* Toolbar */}
       <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-zinc-100">
         <div className="relative flex-1">
-          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" />
-          <input
-            className="w-full pl-7 pr-3 py-1.5 text-xs border border-zinc-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-zinc-300"
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: "#a1a1aa" }} />
+          <Input
             placeholder="Search queue ID, sender, recipient…"
             value={search}
             onChange={e => setSearch(e.target.value)}
+            className="pl-10"
           />
         </div>
-        <div className="inline-flex items-center gap-0.5 rounded-lg p-0.5 bg-zinc-100">
+        <div className="inline-flex items-center gap-0.5 rounded-lg p-0.5 bg-zinc-100 h-9">
           {["all", "sent", "deferred", "bounced"].map(s => (
             <button key={s}
               onClick={() => setStatusFilter(s)}
-              className={`px-3 py-1 text-xs rounded-md transition-colors font-medium ${
-                statusFilter === s ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+              className={`px-3 py-1.5 text-xs rounded-md transition-colors font-medium ${
+                statusFilter === s ? "bg-white text-zinc-800 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
               }`}>{s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}</button>
           ))}
         </div>
@@ -141,7 +142,7 @@ export function QueueSummaryTable({ sinceHours, refreshKey }: Props) {
                     </td>
                     <td className="px-4 py-2.5 text-zinc-400 tabular-nums whitespace-nowrap">{fmtTime(r.timestamp)}</td>
                     <td className="px-4 py-2.5 font-mono text-zinc-600 whitespace-nowrap">{r.queueId}</td>
-                    <td className="px-4 py-2.5 max-w-[200px]">
+                    <td className="px-4 py-2.5 max-w-50">
                       <span className="truncate block text-zinc-700" title={r.from}>{r.from || "—"}</span>
                     </td>
                     <td className="px-4 py-2.5">

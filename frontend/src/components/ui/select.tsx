@@ -9,7 +9,7 @@ export function NativeSelect({
   return (
     <div className="relative inline-flex items-center">
       <select
-        className={`h-9 appearance-none rounded-lg border border-[color:var(--input-border)] bg-[color:var(--input-bg)] pl-3 pr-8 text-sm text-[color:var(--content-text)] outline-none focus:border-[color:var(--accent)] focus:ring-2 focus:ring-[color:var(--accent)]/20 cursor-pointer ${className}`}
+        className={`h-9 appearance-none rounded-lg border border-zinc-200 bg-white pl-3 pr-8 text-sm text-zinc-700 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 cursor-pointer ${className}`}
         {...props}
       >
         {children}

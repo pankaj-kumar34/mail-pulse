@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { Events } from "@wailsio/runtime";
 import {
   GetMetrics,
   GetDelayInsights,
@@ -15,9 +16,22 @@ export function usePostfixLogs() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedFile, setSelectedFile] = useState("mail.0.log");
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
+  const [ingestProgress, setIngestProgress] = useState<{ pct: number; msg: string } | null>(null);
+
+  // Listen for backend ingest progress events
+  useEffect(() => {
+    const off = Events.On("ingest:progress", (event: any) => {
+      const data = event?.data?.[0] ?? event;
+      if (data && typeof data === "object") {
+        setIngestProgress({ pct: data.pct ?? 0, msg: data.msg ?? "" });
+      }
+    });
+    return () => { off?.(); };
+  }, []);
 
   const ingest = useCallback(async () => {
     setIsLoading(true);
+    setIngestProgress({ pct: 0, msg: "Starting…" });
     try {
       const result = await IngestFile();
       const sel = result?.["selectedFile"] as string | undefined;
@@ -31,6 +45,7 @@ export function usePostfixLogs() {
       console.error(e);
     } finally {
       setIsLoading(false);
+      setIngestProgress(null);
     }
   }, []);
 
@@ -55,6 +70,7 @@ export function usePostfixLogs() {
 
   const refreshFile = useCallback(async (filename?: string) => {
     setIsLoading(true);
+    setIngestProgress({ pct: 0, msg: "Starting…" });
     try {
       const result = await RefreshFile(filename ?? "");
       if (filename) setSelectedFile(filename);
@@ -68,6 +84,7 @@ export function usePostfixLogs() {
       setError("Failed to refresh from file.");
     } finally {
       setIsLoading(false);
+      setIngestProgress(null);
     }
   }, []);
 
@@ -83,6 +100,7 @@ export function usePostfixLogs() {
   return {
     isConnected,
     isLoading,
+    ingestProgress,
     error,
     reconnect,
     refreshFile,

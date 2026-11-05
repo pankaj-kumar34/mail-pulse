@@ -4,6 +4,7 @@ import { EmptyState } from "./EmptyState";
 
 interface HeatmapCell {
   date: string;
+  dateEpoch: number;
   hour: number;
   sent: number;
   defer: number;
@@ -13,6 +14,7 @@ interface HeatmapCell {
 
 interface Props {
   sinceHours: number;
+  refreshKey?: number;
 }
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -51,7 +53,7 @@ function cellTextColor(cell: HeatmapCell | undefined, maxTotal: number): string 
   return intensity > 0.5 ? "#fff" : "#52525b";
 }
 
-export function HourlyHeatmap({ sinceHours }: Props) {
+export function HourlyHeatmap({ sinceHours, refreshKey }: Props) {
   const [cells, setCells] = useState<HeatmapCell[]>([]);
   const [loading, setLoading] = useState(true);
   const [tooltip, setTooltip] = useState<{ cell: HeatmapCell; x: number; y: number } | null>(null);
@@ -61,7 +63,7 @@ export function HourlyHeatmap({ sinceHours }: Props) {
     (LogService.GetHeatmap(sinceHours) as any)
       .then((r: any) => { setCells(r ?? []); setLoading(false); })
       .catch(() => { setCells([]); setLoading(false); });
-  }, [sinceHours]);
+  }, [sinceHours, refreshKey]);
 
   if (loading) return <div className="flex items-center justify-center h-32 text-zinc-400 text-sm">Loading…</div>;
   if (!cells.length) return <EmptyState icon="inbox" title="No data" subtitle="Load a log file to see the heatmap" compact />;

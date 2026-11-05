@@ -65,7 +65,7 @@ export function QueueAgeChart({ sinceHours }: { sinceHours: number }) {
         ].map(s => (
           <div key={s.label}>
             <p style={{ fontSize: "10px", fontWeight: 600, letterSpacing: "0.08em", textTransform: "uppercase", color: "#a1a1aa", margin: "0 0 2px 0" }}>{s.label}</p>
-            <p style={{ fontSize: "16px", fontWeight: 700, color: "#18181b", margin: 0, fontVariantNumeric: "tabular-nums" }}>{s.value}</p>
+            <p style={{ fontSize: "16px", fontWeight: 700, color: "#3f3f46", margin: 0, fontVariantNumeric: "tabular-nums" }}>{s.value}</p>
           </div>
         ))}
       </div>

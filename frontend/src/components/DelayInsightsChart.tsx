@@ -51,7 +51,7 @@ function TopStatCard({ label, avg, min, max }: { label: string; avg: number; min
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-xs text-zinc-400">Avg:</span>
-            <span className="text-sm font-bold text-zinc-900 tabular-nums">{fmtDelay(avg)}</span>
+            <span className="text-sm font-bold text-zinc-800 tabular-nums">{fmtDelay(avg)}</span>
           </div>
           <div className="flex items-center justify-between">
             <span className="text-xs text-zinc-400">Min:</span>
@@ -93,7 +93,7 @@ function TransmissionCard({ avg, min, max }: { avg: number; min: number; max: nu
         <div className="flex items-end justify-center gap-12">
           <div className="text-center">
             <p className="text-xs text-zinc-400 mb-1">Average</p>
-            <p className="text-xl font-bold text-zinc-900 tabular-nums">{fmtDelay(avg)}</p>
+            <p className="text-xl font-bold text-zinc-800 tabular-nums">{fmtDelay(avg)}</p>
           </div>
           <div className="text-center">
             <p className="text-xs text-zinc-400 mb-1">Minimum</p>
@@ -176,7 +176,7 @@ export default function DelayInsightsChart({ delayInsights }: { delayInsights: D
       {d.delayDistribution?.length > 0 && (
         <div className="rounded-xl bg-white overflow-hidden" style={{border:"1px solid #e4e4e7"}}>
           <div className="px-5 py-3.5 border-b border-zinc-100">
-            <p className="text-sm font-semibold text-zinc-900">Delay Distribution</p>
+            <p className="text-sm font-semibold text-zinc-800">Delay Distribution</p>
             <p className="text-xs text-zinc-400 mt-0.5">Message count per delay bucket</p>
           </div>
           <div className="pt-4">
@@ -224,7 +224,7 @@ function TrendChart({ trendData }: { trendData: Record<string, any>[] }) {
     <div className="rounded-xl bg-white overflow-hidden" style={{border:"1px solid #e4e4e7"}}>
       <div className="px-5 py-3.5 border-b border-zinc-100 flex items-center justify-between gap-4">
         <div>
-          <p className="text-sm font-semibold text-zinc-900">Delay Breakdown Over Time</p>
+          <p className="text-sm font-semibold text-zinc-800">Delay Breakdown Over Time</p>
           <p className="text-xs text-zinc-400 mt-0.5">Click a series to show/hide</p>
         </div>
         {/* Custom legend toggles */}

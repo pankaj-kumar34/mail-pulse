@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -124,10 +125,34 @@ func findLogsDir() string {
 	return filepath.Join(home, ".mail-pulse", "logs")
 }
 
+func prefsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".mail-pulse", "prefs.json")
+}
+
+func loadSelectedFile() string {
+	data, err := os.ReadFile(prefsPath())
+	if err != nil {
+		return "mail.0.log"
+	}
+	var prefs struct {
+		SelectedFile string `json:"selected_file"`
+	}
+	if err := json.Unmarshal(data, &prefs); err != nil || prefs.SelectedFile == "" {
+		return "mail.0.log"
+	}
+	return prefs.SelectedFile
+}
+
+func saveSelectedFile(file string) {
+	data, _ := json.Marshal(map[string]string{"selected_file": file})
+	_ = os.WriteFile(prefsPath(), data, 0644)
+}
+
 func NewLogService() *LogService {
 	return &LogService{
 		store:        newLogStore(),
-		selectedFile: "mail.0.log",
+		selectedFile: loadSelectedFile(),
 		logsDir:      findLogsDir(),
 	}
 }
@@ -209,6 +234,7 @@ func (l *LogService) RefreshFile(filename string) map[string]interface{} {
 	l.mu.Lock()
 	if filename != "" {
 		l.selectedFile = filename
+		saveSelectedFile(filename)
 	}
 	l.ingested = false
 	l.mu.Unlock()

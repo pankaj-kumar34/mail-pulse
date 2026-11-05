@@ -229,6 +229,7 @@ var deferRules = []reasonRule{
 
 var bounceRules = []reasonRule{
 	{reason: "Unknown user (5.1.1)",        anyOf: []string{"5.1.1", "user unknown", "no such user"}},
+	{reason: "Mailbox not found (5.0.0)",   anyOf: []string{"mailbox not found", "552", "requested mail action aborted"}},
 	{reason: "Inactive account (5.2.1)",    anyOf: []string{"5.2.1", "inactive", "disabled"}},
 	{reason: "Mailbox full (5.2.2)",        anyOf: []string{"5.2.2", "over quota", "mailbox full"}},
 	{reason: "Address rejected (5.4.1)",    anyOf: []string{"5.4.1", "access denied", "mailbox unavailable"}},

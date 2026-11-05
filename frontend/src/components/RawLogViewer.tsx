@@ -1,15 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Search, FolderOpen, RefreshCw, WrapText, AlignLeft, X } from "lucide-react";
+import { Search, WrapText, AlignLeft, X } from "lucide-react";
+import { EmptyState } from "./EmptyState";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/select";
 
 interface Props {
   refreshKey: number;
   selectedFile: string | null;
-  availableFiles: string[];
-  onFileChange: (file?: string) => void;
 }
 
 const PAGE   = 200;
@@ -39,7 +37,7 @@ function highlight(line: string, query: string) {
   </>);
 }
 
-export function RawLogViewer({ refreshKey, selectedFile, availableFiles, onFileChange }: Props) {
+export function RawLogViewer({ refreshKey, selectedFile }: Props) {
   // ── Normal scroll state ───────────────────────────────────────────────────
   const [total, setTotal]       = useState(0);
   const [indexing, setIndexing] = useState(false);
@@ -184,16 +182,16 @@ export function RawLogViewer({ refreshKey, selectedFile, availableFiles, onFileC
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full bg-white font-mono">
+    <div className="flex flex-col h-full bg-white">
       {/* Toolbar */}
-      <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-zinc-100">
+      <div className="shrink-0 flex items-center gap-2 px-5 py-3 border-b border-zinc-100">
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 pointer-events-none" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
           <Input
             placeholder="Search full file…"
             value={query}
             onChange={e => setQuery(e.target.value)}
-            className="pl-8 pr-8 font-mono"
+            className="pl-10 pr-8"
           />
           {query && (
             <button onClick={clearSearch}
@@ -202,28 +200,10 @@ export function RawLogViewer({ refreshKey, selectedFile, availableFiles, onFileC
             </button>
           )}
         </div>
-
-        <div className="flex items-center gap-1.5 h-9 px-2.5 rounded-lg"
-          style={{ border: "1px solid #e4e4e7", background: "#f4f4f5" }}>
-          <FolderOpen className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-          <NativeSelect value={selectedFile || ""}
-            onChange={e => { if (e.target.value) onFileChange(e.target.value); }}
-            className="border-none bg-transparent shadow-none h-full pl-0 pr-6 text-xs text-zinc-700">
-            {availableFiles.map(f => <option key={f} value={f}>{f}</option>)}
-          </NativeSelect>
-        </div>
-
         <button onClick={() => setWrap(w => !w)} title={wrap ? "No wrap" : "Wrap lines"}
           className={`h-9 w-9 flex items-center justify-center rounded-lg border transition-colors cursor-pointer ${wrap ? "bg-emerald-50 border-emerald-200" : "hover:bg-zinc-50 border-zinc-200"}`}>
           {wrap ? <WrapText className="w-3.5 h-3.5" style={{ color: "#10b981" }} />
                 : <AlignLeft className="w-3.5 h-3.5 text-zinc-400" />}
-        </button>
-
-        <button onClick={() => selectedFile && indexFile(selectedFile)}
-          className="h-9 w-9 flex items-center justify-center rounded-lg border border-zinc-200 transition-colors cursor-pointer hover:bg-zinc-50"
-          title="Re-index file">
-          <RefreshCw className={`w-3.5 h-3.5 ${indexing || searching ? "animate-spin" : ""}`}
-            style={{ color: (indexing || searching) ? "#10b981" : "#71717a" }} />
         </button>
       </div>
 
@@ -265,7 +245,7 @@ export function RawLogViewer({ refreshKey, selectedFile, availableFiles, onFileC
           {indexing ? (
             <p className="text-zinc-400 font-sans text-sm text-center py-16">Indexing…</p>
           ) : total === 0 ? (
-            <p className="text-zinc-400 font-sans text-sm text-center py-16">No lines</p>
+            <EmptyState icon="log" title="No lines" subtitle="Load a log file to view its contents" fill />
           ) : (
             <div style={{ height: scrollVirtualizer.getTotalSize(), position: "relative" }}>
               {scrollItems.map(vItem => {

@@ -72,9 +72,9 @@ export function MailQueueTable({ refreshKey }: { refreshKey: number }) {
         style={{ borderColor: "#e4e4e7" }}>
         {qError && <span className="text-xs" style={{ color: "var(--c-yellow)" }}>{qError}</span>}
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 pointer-events-none"
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none"
             style={{ color: "#a1a1aa" }} />
-          <Input placeholder="Search queue ID, sender…" value={search} onChange={e => setSearch(e.target.value)} className="pl-8" />
+          <Input placeholder="Search queue ID, sender…" value={search} onChange={e => setSearch(e.target.value)} className="pl-10" />
         </div>
         <NativeSelect value={queue || ""} onChange={e => setQueue(e.target.value)}>
           <option value="">All Queues</option>
@@ -122,13 +122,13 @@ export function MailQueueTable({ refreshKey }: { refreshKey: number }) {
             ) : entries.map(e => (
               <tr key={e.queue_id} className="border-b hover:bg-zinc-50 transition-colors"
                 style={{ borderColor: "#f4f4f5" }}>
-                <td className="px-5 py-3 font-mono text-xs" style={{ color: "#18181b" }}>{e.queue_id}</td>
+                <td className="px-5 py-3 font-mono text-xs" style={{ color: "#3f3f46" }}>{e.queue_id}</td>
                 <td className="px-5 py-3">
                   <StatusBadge variant={QUEUE_BADGE[e.queue_name] ?? "secondary"}>{e.queue_name}</StatusBadge>
                 </td>
                 <td className="px-5 py-3 text-xs tabular-nums" style={{ color: "#71717a" }}>{fmtBytes(e.message_size)}</td>
                 <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: "#71717a" }}>{fmtArrival(e.arrival_time)}</td>
-                <td className="px-5 py-3 text-xs max-w-[200px] truncate" style={{ color: "#18181b" }}>{e.sender}</td>
+                <td className="px-5 py-3 text-xs max-w-[200px] truncate" style={{ color: "#3f3f46" }}>{e.sender}</td>
                 <td className="px-5 py-3 text-xs" style={{ color: "#71717a" }}>
                   {e.recipients?.length ? e.recipients.map(r => r.address).join(", ") : "—"}
                 </td>

@@ -13,6 +13,7 @@ var assets embed.FS
 func main() {
 	logSvc := NewLogService()
 	mailQSvc := NewMailQueueService()
+	cosSvc := NewCOSService(logSvc)
 
 	app := application.New(application.Options{
 		Name:        "Mail Pulse",
@@ -20,6 +21,7 @@ func main() {
 		Services: []application.Service{
 			application.NewService(logSvc),
 			application.NewService(mailQSvc),
+			application.NewService(cosSvc),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

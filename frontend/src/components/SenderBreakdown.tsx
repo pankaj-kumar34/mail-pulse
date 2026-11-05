@@ -26,7 +26,7 @@ export function SenderBreakdown({ sinceHours, maxHeight }: { sinceHours: number;
   return (
     <div className="rounded-xl border border-zinc-100 bg-white flex flex-col">
       <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
-        <h3 className="text-sm font-semibold text-zinc-900">Sender Breakdown</h3>
+        <h3 className="text-sm font-semibold text-zinc-800">Sender Breakdown</h3>
         <p className="text-xs mt-0.5 text-zinc-400">Delivery stats per sender address</p>
       </div>
       <div className="overflow-auto" style={{ maxHeight: maxHeight ? `${maxHeight}px` : undefined }}>

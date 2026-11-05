@@ -151,6 +151,7 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		sent, deferred, bounced := domainSent[d], domainDeferred[d], domainBounced[d]
 		total := sent + deferred + bounced
 		if total < 5 { continue }
+		if deferred+bounced == 0 { continue } // exclude domains with no failures
 		failRate := float64(deferred+bounced) / float64(total) * 100
 		deliveries = append(deliveries, DomainDelivery{
 			Domain: d, Sent: sent, Deferred: deferred,

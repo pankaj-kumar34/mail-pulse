@@ -60,7 +60,7 @@ function Card({ title, subtitle, children, className = "", maxHeight }: {
   return (
     <div className={`rounded-xl border border-zinc-100 bg-white flex flex-col ${className}`} style={{ position: "relative" }}>
       <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
-        <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
+        <h3 className="text-sm font-semibold text-zinc-800">{title}</h3>
         {subtitle && <p className="text-xs mt-0.5 text-zinc-400">{subtitle}</p>}
       </div>
       <div className="p-4" style={maxHeight ? { overflowY: "auto", maxHeight } : { flex: 1, minHeight: 0 }}>
@@ -138,7 +138,7 @@ export function VolumeInsightsChart({ data, sinceHours }: { data: VolumeInsights
   const closeSender   = useCallback(() => setDrillSender(null), []);
 
   if (!data) return (
-    <div className="flex-1 flex items-center justify-center text-zinc-400 text-sm">No data</div>
+    <div className="flex-1 flex items-center justify-center"><EmptyState icon="chart" title="No data" subtitle="Load a log file to see volume insights" /></div>
   );
 
   const deferColors  = DEFER_COLORS;

@@ -63,7 +63,7 @@ export function ReasonDrilldownPanel({ reason, status, sinceHours, onClose, titl
           color: STATUS_COLOR[status] ?? "#6366f1",
           fontWeight: 600,
         }}>{badgeLabel}</span>
-        <span style={{ fontSize: "12px", color: "#18181b", flex: 1, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ fontSize: "12px", color: "#3f3f46", flex: 1, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
         {rows && <span style={{ fontSize: "11px", color: "#a1a1aa", flexShrink: 0 }}>{rows.length.toLocaleString()} messages</span>}
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#a1a1aa", display: "flex", flexShrink: 0 }}><X size={14} /></button>
       </div>

@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import {
   Mail, Clock, AlertCircle, AlertTriangle, RefreshCw,
   FolderOpen, LayoutDashboard, Activity, BarChart2, TrendingUp, Inbox, ScrollText,
-  CheckCircle2, BarChart, Network, Users,
+  CheckCircle2, BarChart, Network, Users, Cloud,
 } from "lucide-react";
 import { usePostfixLogs, GetMetrics, GetDelayInsights } from "../hooks/usePostfixLogs";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
@@ -19,9 +19,10 @@ import { TopDomainsTable } from "./TopDomainsTable";
 import { RawLogViewer } from "./RawLogViewer";
 import { VolumeInsightsChart } from "./VolumeInsightsChart";
 import { RelayInsightsPanel } from "./RelayInsightsPanel";
+import LogSourcePanel from "./LogSourcePanel";
 import { NativeSelect } from "@/components/ui/select";
 
-type Tab = "overview" | "volume" | "insights" | "activity" | "queuesummary" | "qmgr" | "queue" | "relays" | "errors" | "rawlog";
+type Tab = "overview" | "volume" | "insights" | "activity" | "queuesummary" | "qmgr" | "queue" | "relays" | "errors" | "rawlog" | "logsource";
 
 interface Metrics {
   totalSent: number; totalDeferred: number; totalBounced: number;
@@ -34,16 +35,17 @@ interface Metrics {
 }
 
 const NAV: { id: Tab; label: string; icon: React.ElementType }[] = [
-  { id: "overview",  label: "Overview",   icon: LayoutDashboard },
-  { id: "volume",    label: "Volume",     icon: BarChart        },
-  { id: "insights",  label: "Insights",   icon: TrendingUp      },
+  { id: "overview",  label: "Overview",      icon: LayoutDashboard },
+  { id: "volume",    label: "Volume",         icon: BarChart        },
+  { id: "insights",  label: "Insights",       icon: TrendingUp      },
   { id: "activity",     label: "Activity",      icon: Activity        },
   { id: "queuesummary", label: "Queue Summary", icon: Users           },
   { id: "qmgr",         label: "Qmgr",          icon: BarChart2       },
-  { id: "queue",     label: "Mail Queue", icon: Inbox           },
-  { id: "relays",    label: "Relays",      icon: Network         },
-  { id: "errors",    label: "Diagnostics", icon: AlertCircle     },
-  { id: "rawlog",    label: "Raw Log",    icon: ScrollText      },
+  { id: "queue",     label: "Mail Queue",     icon: Inbox           },
+  { id: "relays",    label: "Relays",         icon: Network         },
+  { id: "errors",    label: "Diagnostics",    icon: AlertCircle     },
+  { id: "rawlog",    label: "Raw Log",        icon: ScrollText      },
+  { id: "logsource", label: "Log Source",     icon: Cloud           },
 ];
 
 const TAB_TITLE: Record<Tab, string> = {
@@ -57,6 +59,7 @@ const TAB_TITLE: Record<Tab, string> = {
   relays:        "Relay Insights",
   errors:        "Diagnostics",
   rawlog:        "Raw Log",
+  logsource:     "Log Source",
 };
 
 export default function Dashboard() {
@@ -129,7 +132,7 @@ export default function Dashboard() {
   
 
   return (
-    <div className="h-screen flex overflow-hidden p-2.5 gap-2" style={{ background: "#d8d8de" }}>
+    <div className="flex overflow-hidden p-2.5 gap-2" style={{ background: "#d8d8de", height: "100%" }}>
 
       {/* ── Sidebar panel ───────────────────────────────────────────────── */}
       <aside className="w-[210px] shrink-0 flex flex-col rounded-2xl overflow-hidden"
@@ -240,7 +243,7 @@ export default function Dashboard() {
         {/* Topbar */}
         <div className="shrink-0 h-[52px] flex items-center px-5 gap-3 bg-white"
           style={{ borderBottom: "1px solid #e4e4e7", WebkitAppRegion: "drag" } as React.CSSProperties}>
-          <h1 className="flex-1 text-[14px] font-semibold text-zinc-900">{TAB_TITLE[tab]}</h1>
+          <h1 className="flex-1 text-[14px] font-semibold text-zinc-800">{TAB_TITLE[tab]}</h1>
 
           {error && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
@@ -251,15 +254,15 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* File picker — hidden on live tabs like Mail Queue */}
-          {tab !== "queue" && tab !== "rawlog" && (
-            <div className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg"
-              style={{ border: "1px solid #e4e4e7", background: "#f4f4f5", WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          {/* File picker — hidden on Mail Queue and Log Source */}
+          {tab !== "queue" && tab !== "logsource" && (
+            <div className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-zinc-200 bg-white"
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
               <FolderOpen className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
               <NativeSelect
                 value={selectedFile || ""}
                 onChange={e => { if (e.target.value) void refreshFile(e.target.value); }}
-                className="border-none bg-transparent shadow-none h-full pl-0 pr-6 text-xs text-zinc-700"
+                className="!border-none !bg-transparent !shadow-none h-full pl-0 pr-6 text-xs text-zinc-600"
               >
                 {availableFiles.map(f => <option key={f} value={f}>{f}</option>)}
               </NativeSelect>
@@ -267,7 +270,7 @@ export default function Dashboard() {
           )}
 
           {/* Refresh — hidden on tabs that have their own toolbar refresh */}
-          {tab !== "queue" && tab !== "rawlog" && (
+          {tab !== "queue" && tab !== "logsource" && (
             <button
               onClick={() => void refreshFile()}
               title="Refresh"
@@ -334,7 +337,7 @@ export default function Dashboard() {
               {/* Right: Retry Timeline */}
               <div className="w-72 shrink-0 rounded-xl border border-zinc-100 bg-white overflow-hidden flex flex-col">
                 <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
-                  <h3 className="text-sm font-semibold text-zinc-900">Retry Timeline</h3>
+                  <h3 className="text-sm font-semibold text-zinc-800">Retry Timeline</h3>
                   <p className="text-xs mt-0.5 text-zinc-400">Delivery attempts per queue ID</p>
                 </div>
                 <div className="flex-1 min-h-0 overflow-hidden">
@@ -390,7 +393,7 @@ export default function Dashboard() {
               {/* Left: IP Reputation */}
               <div className="w-80 shrink-0 rounded-xl border border-zinc-100 bg-white flex flex-col overflow-hidden" style={{ position: "relative" }}>
                 <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
-                  <h3 className="text-sm font-semibold text-zinc-900">IP Reputation</h3>
+                  <h3 className="text-sm font-semibold text-zinc-800">IP Reputation</h3>
                   <p className="text-xs mt-0.5 text-zinc-400">Blocklist events for your sending IPs</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4" style={{ position: "relative" }}>
@@ -408,8 +411,15 @@ export default function Dashboard() {
           {mountedTabs.has("rawlog") && (
             <div className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "rawlog" ? "block" : "none" }}>
-              <RawLogViewer refreshKey={refreshKey} selectedFile={selectedFile}
-                availableFiles={availableFiles} onFileChange={refreshFile} />
+              <RawLogViewer refreshKey={refreshKey} selectedFile={selectedFile} />
+            </div>
+          )}
+
+          {/* Log Source */}
+          {mountedTabs.has("logsource") && (
+            <div className="absolute inset-0 overflow-hidden"
+              style={{ display: tab === "logsource" ? "block" : "none" }}>
+              <LogSourcePanel onLoaded={() => { fetchAvailableFiles(); refreshFile("mail.log"); setTab("overview"); }} />
             </div>
           )}
 

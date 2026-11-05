@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
-import { AlertTriangle, ShieldOff, CheckCircle2, ArrowLeft, X } from "lucide-react";
+import { AlertTriangle, ShieldOff, CheckCircle2, ArrowLeft, X, Search } from "lucide-react";
+import { EmptyState } from "./EmptyState";
+import { Input } from "@/components/ui/input";
 
 interface RelayStat {
   relay: string; sent: number; deferred: number; bounced: number;
@@ -38,7 +40,7 @@ function RelayMessageDrilldown({ relay, status, sinceHours, onClose }: {
         <button onClick={onClose} style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "12px", color: "#71717a", background: "none", border: "none", cursor: "pointer" }}>
           <ArrowLeft size={13} /> Back
         </button>
-        <span style={{ fontSize: "12px", fontFamily: "monospace", color: "#18181b", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relay}</span>
+        <span style={{ fontSize: "12px", fontFamily: "monospace", color: "#3f3f46", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{relay}</span>
         <span style={{ fontSize: "11px", padding: "1px 8px", borderRadius: "4px", background: STATUS_BG[status] ?? "#f4f4f5", color: STATUS_COLOR[status] ?? "#71717a", fontWeight: 600 }}>{label}</span>
         {rows && <span style={{ fontSize: "11px", color: "#a1a1aa" }}>{rows.length} messages</span>}
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#a1a1aa", display: "flex" }}><X size={14} /></button>
@@ -48,7 +50,7 @@ function RelayMessageDrilldown({ relay, status, sinceHours, onClose }: {
         {!rows ? (
           <div style={{ padding: "24px", textAlign: "center", color: "#a1a1aa", fontSize: "13px" }}>Loading…</div>
         ) : rows.length === 0 ? (
-          <div style={{ padding: "24px", textAlign: "center", color: "#a1a1aa", fontSize: "13px" }}>No messages</div>
+          <EmptyState icon="network" title="No messages" compact />
         ) : (
           <table style={{ width: "100%", fontSize: "11px", borderCollapse: "collapse" }}>
             <thead style={{ position: "sticky", top: 0 }}>
@@ -104,9 +106,16 @@ function RelayTable({ rows, maxFail, onDrill }: {
   rows: RelayStat[]; maxFail: number;
   onDrill: (relay: string, status: string) => void;
 }) {
-  if (!rows.length) return <p className="text-zinc-400 text-sm px-4 py-3">None detected</p>;
+  if (!rows.length) return <EmptyState icon="network" title="None detected" compact />;
   return (
-    <table style={{ width: "100%", fontSize: "11px", borderCollapse: "collapse" }}>
+    <table style={{ width: "100%", fontSize: "11px", borderCollapse: "collapse", tableLayout: "fixed" }}>
+      <colgroup>
+        <col style={{ width: "55%" }} />
+        <col style={{ width: "11.25%" }} />
+        <col style={{ width: "11.25%" }} />
+        <col style={{ width: "11.25%" }} />
+        <col style={{ width: "11.25%" }} />
+      </colgroup>
       <thead style={{ position: "sticky", top: 0 }}>
         <tr style={{ background: "#fafafa", borderBottom: "1px solid #f4f4f5" }}>
           {["Relay Host", "Sent", "Deferred", "Bounced", "Fail %"].map((h, i) => (
@@ -164,7 +173,7 @@ function Section({ title, subtitle, icon: Icon, iconBg, iconColor, children }: {
           <Icon size={14} style={{ color: iconColor }} />
         </div>
         <div>
-          <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
+          <h3 className="text-sm font-semibold text-zinc-800">{title}</h3>
           <p className="text-xs text-zinc-400">{subtitle}</p>
         </div>
       </div>
@@ -212,11 +221,14 @@ export function RelayInsightsPanel({ sinceHours, refreshKey }: { sinceHours: num
     <div className="flex flex-col h-full" style={{ position: "relative" }}>
       {/* Search bar */}
       <div className="px-5 py-2.5 border-b border-zinc-100 bg-white shrink-0">
-        <input
-          value={filter} onChange={e => setFilter(e.target.value)}
-          placeholder="Filter by relay hostname…"
-          className="w-full text-sm px-3 py-1.5 rounded-lg border border-zinc-200 outline-none focus:border-zinc-400 bg-white text-zinc-700 placeholder:text-zinc-400"
-        />
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none" style={{ color: "#a1a1aa" }} />
+          <Input
+            value={filter} onChange={e => setFilter(e.target.value)}
+            placeholder="Filter by relay hostname…"
+            className="pl-10"
+          />
+        </div>
       </div>
       {/* Three equal-height scrollable cards */}
       <div className="flex flex-col flex-1 min-h-0 px-5 pt-3 pb-4 gap-4">

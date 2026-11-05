@@ -51,7 +51,7 @@ function BlockEventDrilldown({ stat, sinceHours, onClose }: {
           <ArrowLeft size={13} /> Back
         </button>
         <span style={{ fontSize: "10px", padding: "1px 8px", borderRadius: "4px", background: "#fff1f2", color: "#e11d48", fontWeight: 600, fontFamily: "monospace" }}>{stat.ourIp}</span>
-        <span style={{ fontSize: "12px", color: "#18181b", flex: 1, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stat.service}</span>
+        <span style={{ fontSize: "12px", color: "#3f3f46", flex: 1, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stat.service}</span>
         {rows && <span style={{ fontSize: "11px", color: "#a1a1aa", flexShrink: 0 }}>{plural(rows.length, "event")}</span>}
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "#a1a1aa", display: "flex", flexShrink: 0 }}><X size={14} /></button>
       </div>

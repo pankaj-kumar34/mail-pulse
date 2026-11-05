@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { ChevronLeft, ChevronRight, Loader2, AlertCircle, AlertTriangle, ServerCrash, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, AlertCircle, AlertTriangle, Search } from "lucide-react";
 import { GetErrors } from "../../bindings/github.com/pankajkumar/mail-pulse/logservice.js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { EmptyState } from "./EmptyState";
 
 interface LogEntry { id: string; timestamp: number; service: string; rawLog?: string; isError: boolean; isWarning: boolean }
 interface Pagination { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean }
@@ -45,15 +46,15 @@ export function ErrorLogViewer({ refreshKey, initialType = "all" }: { refreshKey
       {/* ── Toolbar — full width ── */}
       <div className="shrink-0 flex items-center gap-3 px-5 py-3 border-b border-zinc-100">
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-400 pointer-events-none" />
-          <Input placeholder="Search logs…" value={search} onChange={e => setSearch(e.target.value)} className="pl-8" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400 pointer-events-none" />
+          <Input placeholder="Search logs…" value={search} onChange={e => setSearch(e.target.value)} className="pl-10" />
         </div>
-        <div className="inline-flex items-center gap-0.5 rounded-lg p-0.5 bg-zinc-100">
+        <div className="inline-flex items-center gap-0.5 rounded-lg p-0.5 bg-zinc-100 h-9">
           {TABS.map(t => (
             <button key={t} onClick={() => { setType(t); setSearch(""); }}
               className="px-3 py-1.5 text-xs font-medium rounded-md transition-all cursor-pointer capitalize"
               style={type === t
-                ? { background: "white", color: "#18181b" }
+                ? { background: "white", color: "#3f3f46" }
                 : { background: "transparent", color: "#71717a" }}>
               {t}
             </button>
@@ -68,10 +69,7 @@ export function ErrorLogViewer({ refreshKey, initialType = "all" }: { refreshKey
             <Loader2 className="w-5 h-5 animate-spin text-zinc-300" />
           </div>
         ) : filtered.length === 0 ? (
-          <div className="py-20 flex flex-col items-center gap-3 text-zinc-400">
-            <ServerCrash className="w-10 h-10 text-zinc-200" strokeWidth={1} />
-            <p className="text-sm">{search ? "No matching logs" : "No errors or warnings"}</p>
-          </div>
+          <EmptyState icon="search" title={search ? "No matching logs" : "No errors or warnings"} subtitle={search ? "Try a different search term" : "Your log is clean"} fill />
         ) : (
           <div className="divide-y divide-zinc-100">
             {filtered.map(log => {

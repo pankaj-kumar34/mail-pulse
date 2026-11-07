@@ -47,7 +47,7 @@ function fmtDelay(s: number): string {
   return `${m}m ${sec}s`;
 }
 
-export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: number; initialStatus?: string }) {
+export function ActivityTable({ refreshKey, initialStatus = "", filterSeq = 0 }: { refreshKey: number; initialStatus?: string; filterSeq?: number }) {
   const [rows, setRows]              = useState<MessageRow[]>([]);
   const [pagination, setPagination]  = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
   const [search, setSearch]          = useState("");
@@ -57,7 +57,7 @@ export function ActivityTable({ refreshKey, initialStatus = "" }: { refreshKey: 
   const [loading, setLoading]        = useState(false);
 
   // Sync status when parent navigates here with a new filter
-  useEffect(() => { setStatus(initialStatus); }, [initialStatus]);
+  useEffect(() => { setStatus(initialStatus); }, [initialStatus, filterSeq]);
 
   const fetchRows = useCallback(async (page: number) => {
     setLoading(true);

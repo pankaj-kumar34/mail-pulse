@@ -19,14 +19,24 @@ func (s *logStore) getMetrics(since int64) Metrics {
 	defer s.mu.RUnlock()
 
 	var (
-		totalSent, totalDeferred, totalBounced, totalRemoved int
-		errorCount, warningCount                             int
-		delaySum, delayCount                                 float64
+		totalRemoved int
+		errorCount, warningCount int
+		delaySum, delayCount     float64
 		senderDomains    = make(map[string]int)
 		recipientDomains = make(map[string]int)
 		qmgrActive       = make(map[int64]int)
 		qmgrRemoved      = make(map[int64]int)
 	)
+
+	// Per queueID+recipient final status: priority sent > bounced > deferred.
+	// Key: "queueID|recipient" so each recipient of a multi-recipient message counts separately.
+	type qKey struct{ qid, to string }
+	const (
+		statusDeferred = 1
+		statusBounced  = 2
+		statusSent     = 3
+	)
+	qFinal := make(map[qKey]int)
 
 	for i := range s.logs {
 		e := &s.logs[i]
@@ -35,11 +45,25 @@ func (s *logStore) getMetrics(since int64) Metrics {
 
 		min1 := e.Timestamp / 60000
 		switch e.Status {
-		case "sent":     totalSent++
-		case "deferred": totalDeferred++
-		case "bounced":  totalBounced++
-		case "removed":  totalRemoved++; qmgrRemoved[min1]++
-		case "active":   qmgrActive[min1]++
+		case "sent":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusSent { qFinal[k] = statusSent }
+			}
+		case "deferred":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusDeferred { qFinal[k] = statusDeferred }
+			}
+		case "bounced":
+			if e.QueueID != "" {
+				k := qKey{e.QueueID, e.To}
+				if qFinal[k] < statusBounced { qFinal[k] = statusBounced }
+			}
+		case "removed":
+			totalRemoved++; qmgrRemoved[min1]++
+		case "active":
+			qmgrActive[min1]++
 		}
 		if e.IsError   { errorCount++ }
 		if e.IsWarning { warningCount++ }
@@ -49,6 +73,16 @@ func (s *logStore) getMetrics(since int64) Metrics {
 		if e.Delay > 0 && e.Delays != nil {
 			delayCount++
 			delaySum += e.Delay
+		}
+	}
+
+	// Count unique queue+recipient outcomes
+	var totalSent, totalDeferred, totalBounced int
+	for _, st := range qFinal {
+		switch st {
+		case statusSent:     totalSent++
+		case statusBounced:  totalBounced++
+		case statusDeferred: totalDeferred++
 		}
 	}
 

@@ -78,6 +78,7 @@ export default function Dashboard() {
   const [sinceHours, setSinceHours]           = useState<number>(0); // 0 = all time
   const [logTimeRange, setLogTimeRange]       = useState<{ min: number; max: number } | null>(null);
   const [activityFilter, setActivityFilter]   = useState<string>(""); // pre-filter for activity tab
+  const [activityFilterSeq, setActivityFilterSeq] = useState(0);    // bumped on every nav to force effect
   const [diagFilter, setDiagFilter]           = useState<"all"|"errors"|"warnings">("all");
 
   // Mount tab on first visit — never unmount (lazy mount pattern)
@@ -88,6 +89,7 @@ export default function Dashboard() {
 
   const goToActivity = (status: string) => {
     setActivityFilter(status);
+    setActivityFilterSeq(s => s + 1);
     switchTab("activity");
   };
 
@@ -359,7 +361,7 @@ export default function Dashboard() {
           {mountedTabs.has("activity") && (
             <div className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "activity" ? "block" : "none" }}>
-              <ActivityTable refreshKey={refreshKey} initialStatus={activityFilter} />
+              <ActivityTable refreshKey={refreshKey} initialStatus={activityFilter} filterSeq={activityFilterSeq} />
             </div>
           )}
 

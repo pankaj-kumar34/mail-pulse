@@ -1,0 +1,6 @@
+version: '3'
+tasks:
+  build:
+    cmds: [echo "Not supported on this platform"]
+  package:
+    cmds: [echo "Not supported on this platform"]

@@ -258,7 +258,13 @@ var deferRules = []reasonRule{
 	{reason: "Remote server error", anyOf: []string{"internal resource", "temporarily unavailable"}},
 	{reason: "TLS error", anyOf: []string{"tls", "certificate"}},
 	{reason: "Policy block", anyOf: []string{"policy", "blocked"}},
+	{reason: "IP/domain blocked", anyOf: []string{"blocked", "blocklist", "blacklist", "spam"}},
 	{reason: "Unknown recipient", anyOf: []string{"4.1.", "no such user", "unknown user"}},
+	// DSN code families — vendor-independent structural fallback (RFC 3463).
+	// Placed last so keyword rules win when both are present.
+	{reason: "Mailbox full", anyOf: []string{"4.2."}},
+	{reason: "Remote server error", anyOf: []string{"4.4."}},
+	{reason: "Policy block", anyOf: []string{"4.7."}},
 }
 
 var bounceRules = []reasonRule{
@@ -270,7 +276,7 @@ var bounceRules = []reasonRule{
 	{reason: "Address rejected (5.1.0)", anyOf: []string{"5.1.0", "address rejected"}},
 	{reason: "Policy rejection (5.7.1)", anyOf: []string{"5.7.1"}, allOf: []string{"reject"}},
 	{reason: "Policy rejection (5.7.1)", anyOf: []string{"5.7.1"}, allOf: []string{"policy"}},
-	{reason: "IP/domain blocked", anyOf: []string{"blocked", "blacklist", "blocklist", "spam", "blocklisted"}},
+	{reason: "IP/domain blocked", anyOf: []string{"blocked", "blacklist", "blocklist", "spam"}},
 	{reason: "DNS failure", anyOf: []string{"host not found", "name service error", "name or service not known"}},
 	{reason: "Bad destination (5.1.2)", anyOf: []string{"5.1.2", "bad destination"}},
 	{reason: "Auth/policy failure (5.7.x)", anyOf: []string{"5.7.", "authentication", "dmarc", "spf", "dkim"}},

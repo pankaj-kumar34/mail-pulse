@@ -1,0 +1,179 @@
+name: Release Mail Pulse
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            os: macos-latest
+            goos: darwin
+          - platform: linux-amd64
+            os: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+            archive_ext: tar.gz
+          - platform: windows-amd64
+            os: windows-latest
+            goos: windows
+            goarch: amd64
+            archive_ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GTK / WebKit dependencies
+        if: matrix.goos == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libgtk-4-dev libwebkitgtk-6.0-dev libsecret-1-dev pkg-config
+
+      - name: Resolve Version
+        id: version
+        shell: bash
+        run: |
+          RAW_TAG="${{ github.event.inputs.version || github.ref_name }}"
+          CLEAN_VER="${RAW_TAG#v}"
+          echo "tag=${RAW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${CLEAN_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Wails v3 CLI
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Wails Bindings
+        shell: bash
+        run: wails3 generate bindings -f '-tags production' -clean=true -ts -i
+
+      - name: Build Frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build & Package Application (macOS)
+        if: matrix.goos == 'darwin'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: darwin
+          CGO_CFLAGS: "-mmacosx-version-min=12.0"
+          CGO_LDFLAGS: "-mmacosx-version-min=12.0"
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          for ARCH in arm64 amd64; do
+            DIST_DIR="dist-${ARCH}"
+            mkdir -p "${DIST_DIR}/Mail Pulse.app/Contents/MacOS"
+            mkdir -p "${DIST_DIR}/Mail Pulse.app/Contents/Resources"
+            GOARCH="${ARCH}" go build -tags production -trimpath -buildvcs=false \
+              -ldflags="-w -s -X main.AppVersion=${VER} -X main.GitHubRepo=${{ github.repository }}" \
+              -o "${DIST_DIR}/Mail Pulse.app/Contents/MacOS/Mail Pulse" .
+            cp build/darwin/icons.icns "${DIST_DIR}/Mail Pulse.app/Contents/Resources/" || true
+            if [ -f build/darwin/Assets.car ]; then
+              cp build/darwin/Assets.car "${DIST_DIR}/Mail Pulse.app/Contents/Resources/"
+            fi
+            sed -e "s/0.0.1/${VER}/g" -e "s/1.0.0/${VER}/g" build/darwin/Info.plist > "${DIST_DIR}/Mail Pulse.app/Contents/Info.plist"
+            xattr -cr "${DIST_DIR}/Mail Pulse.app"
+            codesign --force --deep --sign - "${DIST_DIR}/Mail Pulse.app"
+            codesign --verify --deep --strict "${DIST_DIR}/Mail Pulse.app"
+            tar -C "${DIST_DIR}" -czf "mail-pulse-darwin-${ARCH}.tar.gz" "Mail Pulse.app"
+          done
+
+      - name: Build & Package Application (Linux)
+        if: matrix.goos == 'linux'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          go build -tags production -trimpath -buildvcs=false \
+            -ldflags="-w -s -X main.AppVersion=${VER} -X main.GitHubRepo=${{ github.repository }}" \
+            -o dist/mail-pulse .
+          chmod +x dist/mail-pulse
+          tar -C dist -czf "mail-pulse-${{ matrix.platform }}.tar.gz" mail-pulse
+
+      - name: Build & Package Application (Windows)
+        if: matrix.goos == 'windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VER="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          go build -tags production -trimpath -buildvcs=false \
+            -ldflags="-w -s -H windowsgui -X main.AppVersion=${VER} -X main.GitHubRepo=${{ github.repository }}" \
+            -o dist/mail-pulse.exe .
+          powershell -Command "Compress-Archive -Path dist/mail-pulse.exe -DestinationPath mail-pulse-${{ matrix.platform }}.zip -Force"
+
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: mail-pulse-*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum mail-pulse-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: Mail Pulse ${{ github.event.inputs.version || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/mail-pulse-*
+            artifacts/checksums.txt

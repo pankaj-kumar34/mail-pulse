@@ -4,6 +4,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -962,7 +963,87 @@ var (
 	blockERSPattern = regexp.MustCompile(`Mail from <([\d.]+)> was refused due to the sender IP found in (ERS[^\s.]+)`)
 	// "Client host [IP] blocked using <Service Name>"
 	blockClientPattern = regexp.MustCompile(`Client host \[([\d.]+)\] blocked using ([^.(]+)`)
+	// "<IP> is blocklisted by <Vendor>" — FortiGuard/Spamhaus style, e.g.
+	// "host X refused to talk to me: 550 5.5.0 67.18.99.231 is blocklisted by FortiGuard."
+	blocklistedByPattern = regexp.MustCompile(`([\d.]+) is blocklisted by ([A-Za-z][\w .-]*?)(?:\s*[.)]|$)`)
+	// Generic fallback — IPs and blocklist vocabulary, not vendor phrasing.
+	ipv4Pattern   = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	hostIPPattern = regexp.MustCompile(`\[(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\]`)
+	// Vocabulary that indicates an IP-reputation event when combined with a bare IP.
+	blocklistVocab = []string{
+		"blocklist", "blacklist", "block list", "dnsbl", "rbl",
+		"listed in", "listed by", "listed on", "blocked by", "blocked using", "blocked through", "found in",
+	}
+	// Known vendors, for labelling only — detection does not depend on this list.
+	knownVendors = []string{
+		"spamhaus", "spamcop", "barracuda", "fortiguard", "trendmicro", "sorbs",
+		"uceprotect", "backscatterer", "abuseat", "mailspike", "proofpoint", "spameatingwolf", "intxfusion",
+	}
 )
+
+// genericBlockEvent is the catch-all: fires on ANY message that mentions
+// blocklist vocabulary AND a bare (non-remote) IPv4. Remote hosts appear as
+// name[IP] — their IPs are excluded, so what remains is our sending IP.
+// This keeps working for future vendor phrasings with no code change.
+func genericBlockEvent(rawLog string) (ourIP, service string, ok bool) {
+	low := strings.ToLower(rawLog)
+	if !containsAny(low, blocklistVocab) {
+		return "", "", false
+	}
+
+	remote := map[string]bool{}
+	for _, m := range hostIPPattern.FindAllStringSubmatch(rawLog, -1) {
+		remote[m[1]] = true
+	}
+	for _, ip := range ipv4Pattern.FindAllString(rawLog, -1) {
+		if remote[ip] || isPrivateIP(ip) {
+			continue
+		}
+		return ip, guessBlockService(low), true
+	}
+	return "", "", false
+}
+
+// isPrivateIP filters RFC1918/loopback/link-local addresses — those are our own
+// infrastructure, never the blocklisted sending IP.
+func isPrivateIP(ip string) bool {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return true
+	}
+	a, _ := strconv.Atoi(parts[0])
+	b, _ := strconv.Atoi(parts[1])
+	switch {
+	case a == 10 || a == 127 || a == 0:
+		return true
+	case a == 192 && b == 168:
+		return true
+	case a == 172 && b >= 16 && b <= 31:
+		return true
+	case a == 169 && b == 254:
+		return true
+	}
+	return false
+}
+
+// guessBlockService names the blocklist vendor for generic events.
+// Detection is structural; this only affects the display label.
+func guessBlockService(low string) string {
+	for _, v := range knownVendors {
+		if strings.Contains(low, v) {
+			return strings.ToUpper(v[:1]) + v[1:]
+		}
+	}
+	if m := byServicePattern.FindStringSubmatch(low); m != nil {
+		s := strings.TrimSpace(m[1])
+		if s != "" {
+			return strings.ToUpper(s[:1]) + s[1:]
+		}
+	}
+	return "Unknown blocklist"
+}
+
+var byServicePattern = regexp.MustCompile(`(?:by|using|through|in) ([a-z][\w.-]{2,30})`)
 
 func extractBlockEvent(rawLog string) (ourIP, service string, ok bool) {
 	if m := blockERSPattern.FindStringSubmatch(rawLog); m != nil {
@@ -976,6 +1057,13 @@ func extractBlockEvent(rawLog string) (ourIP, service string, ok bool) {
 			svc = "TrendMicro Email Reputation"
 		}
 		return m[1], svc, true
+	}
+	if m := blocklistedByPattern.FindStringSubmatch(rawLog); m != nil {
+		return m[1], strings.TrimSpace(m[2]), true
+	}
+	// Generic structural fallback — future vendor phrasings need no new regex.
+	if ip, svc, ok := genericBlockEvent(rawLog); ok {
+		return ip, svc, true
 	}
 	return "", "", false
 }

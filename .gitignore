@@ -1,5 +1,6 @@
 # ── Build output ──────────────────────────────────────────────────────────────
 bin/
+!bin/.metadata_never_index
 build/bin/
 mail-pulse
 
@@ -31,9 +32,7 @@ frontend/.vite/
 *.swp
 *.swo
 
-# ── Wails auto-generated platform scaffolding (macOS-only app) ────────────────
-build/android/
-build/ios/
-build/linux/
-build/windows/
-build/docker/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store

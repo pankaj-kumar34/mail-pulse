@@ -17,13 +17,20 @@ import {
   Network,
   Users,
   Cloud,
+  Sparkles,
 } from "lucide-react";
 import {
   usePostfixLogs,
   GetMetrics,
   GetDelayInsights,
 } from "../hooks/usePostfixLogs";
-import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
+import {
+  LogService,
+  UpdaterService,
+  type AppVersionInfo,
+  type UpdateCheckResult,
+} from "../../bindings/github.com/pankajkumar/mail-pulse";
+import { UpdateModal } from "./ui/UpdateModal";
 import { MetricCard } from "./MetricCard";
 import DelayInsightsChart from "./DelayInsightsChart";
 import { RetryTimelinePanel } from "./RetryTimelinePanel";
@@ -128,6 +135,10 @@ export default function Dashboard() {
   const [diagFilter, setDiagFilter] = useState<"all" | "errors" | "warnings">(
     "all",
   );
+  const [versionInfo, setVersionInfo] = useState<AppVersionInfo | null>(null);
+  const [updateCheckResult, setUpdateCheckResult] =
+    useState<UpdateCheckResult | null>(null);
+  const [isUpdaterOpen, setIsUpdaterOpen] = useState(false);
 
   // Mount tab on first visit — never unmount (lazy mount pattern)
   const switchTab = (t: Tab) => {
@@ -157,6 +168,20 @@ export default function Dashboard() {
   useEffect(() => {
     void fetchAvailableFiles();
   }, [fetchAvailableFiles]);
+
+  useEffect(() => {
+    UpdaterService.GetVersionInfo()
+      .then((info) => {
+        if (info) setVersionInfo(info);
+      })
+      .catch(() => {});
+
+    UpdaterService.CheckForUpdate()
+      .then((res) => {
+        if (res) setUpdateCheckResult(res);
+      })
+      .catch(() => {});
+  }, []);
 
   const loadData = async (hours: number) => {
     try {
@@ -340,9 +365,28 @@ export default function Dashboard() {
 
         {/* Footer */}
         <div
-          className="px-3 py-3 shrink-0"
+          className="px-3 py-3 shrink-0 space-y-2"
           style={{ borderTop: "1px solid rgba(255,255,255,.08)" }}
         >
+          <div className="flex items-center justify-between px-1">
+            <button
+              onClick={() => setIsUpdaterOpen(true)}
+              className="text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+              title="Check for updates from GitHub Releases"
+            >
+              v{versionInfo?.version || "1.0.0"}
+            </button>
+            {updateCheckResult?.hasUpdate && (
+              <button
+                onClick={() => setIsUpdaterOpen(true)}
+                className="flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25 cursor-pointer"
+                title={`Install Mail Pulse v${updateCheckResult.latestVersion}`}
+              >
+                <Sparkles className="w-2.5 h-2.5" />
+                <span>Update v{updateCheckResult.latestVersion}</span>
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-2 px-1">
             <Clock className="w-3 h-3 text-zinc-400" />
             <span className="text-xs font-mono text-zinc-200">
@@ -709,6 +753,14 @@ export default function Dashboard() {
           )}
         </main>
       </div>
+
+      <UpdateModal
+        isOpen={isUpdaterOpen}
+        onClose={() => setIsUpdaterOpen(false)}
+        versionInfo={versionInfo}
+        initialCheckResult={updateCheckResult}
+        onUpdateCheckComplete={(res) => setUpdateCheckResult(res)}
+      />
     </div>
   );
 }

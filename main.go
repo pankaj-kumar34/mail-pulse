@@ -12,9 +12,12 @@ import (
 var assets embed.FS
 
 func main() {
+	application.RegisterEvent[UpdateProgress]("updater:progress")
+
 	logSvc := NewLogService()
 	mailQSvc := NewMailQueueService()
 	cosSvc := NewCOSService(logSvc)
+	updaterSvc := NewUpdaterService()
 
 	app := application.New(application.Options{
 		Name:        "Mail Pulse",
@@ -23,6 +26,7 @@ func main() {
 			application.NewService(logSvc),
 			application.NewService(mailQSvc),
 			application.NewService(cosSvc),
+			application.NewService(updaterSvc),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

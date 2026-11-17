@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -195,23 +197,32 @@ func findLogsDir() string {
 	return filepath.Join(home, ".mail-pulse", "logs")
 }
 
+var logDateRe = regexp.MustCompile(`(\d{1,2})-(\d{1,2})-(\d{4})\.log$`)
+
+// ──────────────────────────────────────────────
+// Prefs — remembers the last file the user picked.
+// If the remembered file no longer exists, falls back to the newest log,
+// so a stale pref can never cause an error on startup.
+// ──────────────────────────────────────────────
+
 func prefsPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".mail-pulse", "prefs.json")
 }
 
-func loadSelectedFile() string {
+func loadSelectedFile(logsDir string) string {
 	data, err := os.ReadFile(prefsPath())
-	if err != nil {
-		return "mail.0.log"
+	if err == nil {
+		var prefs struct {
+			SelectedFile string `json:"selected_file"`
+		}
+		if json.Unmarshal(data, &prefs) == nil && prefs.SelectedFile != "" {
+			if _, err := os.Stat(filepath.Join(logsDir, prefs.SelectedFile)); err == nil {
+				return prefs.SelectedFile
+			}
+		}
 	}
-	var prefs struct {
-		SelectedFile string `json:"selected_file"`
-	}
-	if err := json.Unmarshal(data, &prefs); err != nil || prefs.SelectedFile == "" {
-		return "mail.0.log"
-	}
-	return prefs.SelectedFile
+	return newestLogFile(logsDir)
 }
 
 func saveSelectedFile(file string) {
@@ -219,11 +230,59 @@ func saveSelectedFile(file string) {
 	_ = os.WriteFile(prefsPath(), data, 0644)
 }
 
+// logDateKey extracts a sortable key (yyyymmdd) from log filenames that end in
+// a date like "-16-11-2026.log" (day-first; swapped when the month is > 12),
+// so "newest" follows the log's date rather than when the file was copied in.
+// Returns 0 when the filename carries no date.
+func logDateKey(name string) int64 {
+	m := logDateRe.FindStringSubmatch(name)
+	if m == nil {
+		return 0
+	}
+	d, _ := strconv.Atoi(m[1])
+	mo, _ := strconv.Atoi(m[2])
+	y, _ := strconv.Atoi(m[3])
+	if d <= 12 && mo > 12 {
+		d, mo = mo, d
+	}
+	return int64(y)*10000 + int64(mo)*100 + int64(d)
+}
+
+// newestLogFile returns the newest .log file in dir — by the date in the
+// filename when present, otherwise by modification time. Falls back to
+// "mail.0.log" when the directory has no log files at all.
+func newestLogFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "mail.0.log"
+	}
+	var best string
+	var bestKey, bestMod int64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		var mod int64
+		if info, err := e.Info(); err == nil {
+			mod = info.ModTime().UnixNano()
+		}
+		key := logDateKey(e.Name())
+		if best == "" || key > bestKey || (key == bestKey && mod > bestMod) {
+			best, bestKey, bestMod = e.Name(), key, mod
+		}
+	}
+	if best == "" {
+		return "mail.0.log"
+	}
+	return best
+}
+
 func NewLogService() *LogService {
+	logsDir := findLogsDir()
 	return &LogService{
 		store:        newLogStore(),
-		selectedFile: loadSelectedFile(),
-		logsDir:      findLogsDir(),
+		selectedFile: loadSelectedFile(logsDir),
+		logsDir:      logsDir,
 	}
 }
 

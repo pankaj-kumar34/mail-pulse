@@ -92,10 +92,26 @@ export function usePostfixLogs() {
 
   const reconnect = useCallback(() => { void ingest(); }, [ingest]);
 
+  const fetchAvailableFiles = useCallback(async () => {
+    try {
+      const files = await ListLogFiles();
+      setAvailableFiles((prev) => {
+        const next = (files ?? []) as string[];
+        // same contents → keep prev identity to avoid pointless rerenders
+        return prev.length === next.length && prev.every((f, i) => f === next[i]) ? prev : next;
+      });
+    } catch (_) {
+      // silently ignore
+    }
+  }, []);
+
   const refreshFile = useCallback(async (filename?: string) => {
     setIsLoading(true);
     setIngestProgress({ pct: 0, msg: "Starting…" });
     try {
+      // re-scan the logs dir so new/rotated files show up in the dropdown
+      void fetchAvailableFiles();
+
       // RefreshFile resets + starts async ingest, returns immediately
       const result = await RefreshFile(filename ?? "") as any;
       if (filename) setSelectedFile(filename);
@@ -121,16 +137,7 @@ export function usePostfixLogs() {
       setIsLoading(false);
       setIngestProgress(null);
     }
-  }, []);
-
-  const fetchAvailableFiles = useCallback(async () => {
-    try {
-      const files = await ListLogFiles();
-      setAvailableFiles((files ?? []) as string[]);
-    } catch (_) {
-      // silently ignore
-    }
-  }, []);
+  }, [fetchAvailableFiles]);
 
   return {
     isConnected,

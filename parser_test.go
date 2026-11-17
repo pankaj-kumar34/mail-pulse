@@ -227,6 +227,9 @@ func TestExtractDeferReason(t *testing.T) {
 		{"greylisted", "Greylisted"},
 		{"TLS handshake failed", "TLS error"},
 		{"mailbox full", "Mailbox full"},
+		{"host mail1.nrwbank.de[213.86.233.144] refused to talk to me: 550 5.5.0 67.18.99.231 is blocklisted by FortiGuard. This email from IP  has been rejected. The email message was detected as spam.", "IP/domain blocked"},
+		{"450 4.7.1 access denied for unknown reasons", "Policy block"},
+		{"450 4.2.0 requested action aborted", "Mailbox full"},
 		{"some completely unknown reason xyz", "Other"},
 		{"", ""},
 	}
@@ -336,6 +339,117 @@ func TestLogStore_DedupsIdenticalLine(t *testing.T) {
 
 	if count != 1 {
 		t.Errorf("store has %d entries, want 1 (identical line should be deduped)", count)
+	}
+}
+
+// ──────────────────────────────────────────────
+// extractBlockEvent — IP reputation patterns
+// ──────────────────────────────────────────────
+
+func TestExtractBlockEvent(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		wantIP  string
+		wantSvc string
+		wantOK  bool
+	}{
+		{
+			name:    "FortiGuard refused to talk (deferred)",
+			raw:     `Nov 16 06:13:15 mail postfix/smtp[28988]: 3DE512001B: to=<th@nrwk.de>, relay=mail1.nrwbank.de[213.86.233.144]:25, delay=2, delays=0.02/0/2/0, dsn=4.5.0, status=deferred (host mail1.nrwbank.de[213.86.233.144] refused to talk to me: 550 5.5.0 67.18.99.231 is blocklisted by FortiGuard. This email from IP  has been rejected. The email message was detected as spam.)`,
+			wantIP:  "67.18.99.231",
+			wantSvc: "FortiGuard",
+			wantOK:  true,
+		},
+		{
+			name:    "TrendMicro ERS",
+			raw:     `Nov 16 00:00:01 mail postfix/smtp[1]: AAA0000001: to=<a@b.com>, relay=x[1.2.3.4]:25, delay=1, delays=0/0/0/1, dsn=5.0.0, status=bounced (host mail.example.com[1.2.3.4] said: 553 Mail from <67.18.99.231> was refused due to the sender IP found in ERS-DUL (in reply to MAIL FROM command))`,
+			wantIP:  "67.18.99.231",
+			wantSvc: "TrendMicro ERS-DUL",
+			wantOK:  true,
+		},
+		{
+			name:    "Client host blocked using",
+			raw:     `Nov 16 00:00:01 mail postfix/smtpd[1]: NOQUEUE: reject: RCPT from unknown[1.2.3.4]: 554 5.7.1 Service unavailable; Client host [67.18.99.231] blocked using TrendMicro-dul; from=<x@y.com> to=<a@b.com>`,
+			wantIP:  "67.18.99.231",
+			wantSvc: "TrendMicro Email Reputation",
+			wantOK:  true,
+		},
+		{
+			name:    "no block event",
+			raw:     `Nov 16 00:00:01 mail postfix/smtp[1]: AAA0000002: to=<a@b.com>, relay=x[1.2.3.4]:25, delay=1, delays=0/0/0/1, dsn=4.2.1, status=deferred (host said: 450 4.2.1 mailbox busy)`,
+			wantOK:  false,
+		},
+		{
+			// Novel format #1 — Spamhaus "listed by" phrasing, no dedicated regex.
+			name:    "generic: Spamhaus listed-by (future format)",
+			raw:     `Nov 16 07:00:00 mail postfix/smtp[1]: AAA0000003: to=<a@b.com>, relay=mx.example.com[1.2.3.4]:25, delay=1, delays=0/0/0/1, dsn=5.7.1, status=bounced (host mx.example.com[1.2.3.4] said: 550 5.7.1 67.18.99.231 listed by zen.spamhaus.org)`,
+			wantIP:  "67.18.99.231",
+			wantSvc: "Spamhaus",
+			wantOK:  true,
+		},
+		{
+			// Novel format #2 — vendor we've never seen, no keyword match in vocab vendor list.
+			name:    "generic: unknown vendor blocked-by (future format)",
+			raw:     `Nov 16 08:00:00 mail postfix/smtp[1]: AAA0000004: to=<a@b.com>, relay=mx.other.com[9.8.7.6]:25, delay=1, delays=0/0/0/1, dsn=5.7.1, status=bounced (host mx.other.com[9.8.7.6] said: 554 5.7.1 connections not accepted from 67.18.99.231: blocked by Acme AntiSpam Shield)`,
+			wantIP:  "67.18.99.231",
+			wantSvc: "Acme",
+			wantOK:  true,
+		},
+		{
+			// "blocked by" WITHOUT a bare IP must not fire.
+			name:    "negative: blocked by policy, no bare IP",
+			raw:     `Nov 16 09:00:00 mail postfix/smtp[1]: AAA0000005: to=<a@b.com>, relay=mx.example.com[1.2.3.4]:25, delay=1, delays=0/0/0/1, dsn=5.7.1, status=bounced (host mx.example.com[1.2.3.4] said: 550 5.7.1 message blocked by policy)`,
+			wantOK:  false,
+		},
+		{
+			// Private/RFC1918 bare IP is our own infra — not a blocklist event.
+			name:    "negative: only private bare IP",
+			raw:     `Nov 16 10:00:00 mail postfix/smtp[1]: AAA0000006: to=<a@b.com>, relay=mx.example.com[1.2.3.4]:25, delay=1, delays=0/0/0/1, dsn=5.7.1, status=bounced (host mx.example.com[1.2.3.4] said: 550 5.7.1 client 10.0.0.5 blocked by spamhaus)`,
+			wantOK:  false,
+		},
+	}
+	for _, c := range cases {
+		ip, svc, ok := extractBlockEvent(c.raw)
+		if ok != c.wantOK {
+			t.Errorf("%s: ok = %v, want %v", c.name, ok, c.wantOK)
+			continue
+		}
+		if ok && ip != c.wantIP {
+			t.Errorf("%s: ip = %q, want %q", c.name, ip, c.wantIP)
+		}
+		if ok && svc != c.wantSvc {
+			t.Errorf("%s: svc = %q, want %q", c.name, svc, c.wantSvc)
+		}
+	}
+}
+
+// End-to-end: a FortiGuard deferred line must produce an IP reputation stat.
+func TestIPReputation_FortiGuardDeferred(t *testing.T) {
+	s := newLogStore()
+	raw := `Nov 16 06:13:15 mail postfix/smtp[28988]: 3DE512001B: to=<th@nrwk.de>, relay=mail1.nrwbank.de[213.86.233.144]:25, delay=2, delays=0.02/0/2/0, dsn=4.5.0, status=deferred (host mail1.nrwbank.de[213.86.233.144] refused to talk to me: 550 5.5.0 67.18.99.231 is blocklisted by FortiGuard. This email from IP  has been rejected. The email message was detected as spam.)`
+	e := parsePostfixLog(raw)
+	if e == nil {
+		t.Fatal("must parse")
+	}
+	s.add(e)
+
+	rep := s.getIPReputationReport(0)
+	if len(rep.Stats) != 1 {
+		t.Fatalf("got %d stats, want 1", len(rep.Stats))
+	}
+	st := rep.Stats[0]
+	if st.OurIP != "67.18.99.231" {
+		t.Errorf("OurIP = %q, want 67.18.99.231", st.OurIP)
+	}
+	if st.Service != "FortiGuard" {
+		t.Errorf("Service = %q, want FortiGuard", st.Service)
+	}
+	if st.Count != 1 {
+		t.Errorf("Count = %d, want 1", st.Count)
+	}
+	if len(st.Domains) != 1 || st.Domains[0] != "nrwk.de" {
+		t.Errorf("Domains = %v, want [nrwk.de]", st.Domains)
 	}
 }
 

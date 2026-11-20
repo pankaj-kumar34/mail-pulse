@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Search, ChevronLeft, ChevronRight, Loader2, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
 import { EmptyState } from "./EmptyState";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,8 @@ interface MessageRow {
   status: string;
   delay: number;
   processTime: number;
+  dsn?: string;
+  smtpMsg?: string;
 }
 interface Pagination { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean }
 
@@ -51,23 +53,31 @@ export function ActivityTable({ refreshKey, sinceHours = 0, initialStatus = "", 
   const [rows, setRows]              = useState<MessageRow[]>([]);
   const [pagination, setPagination]  = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
   const [search, setSearch]          = useState("");
+  const [query, setQuery]            = useState(""); // debounced search — backend rescans per keystroke are costly on big logs
   const [status, setStatus]          = useState(initialStatus);
   const [sortBy, setSortBy]          = useState("time");
   const [sortOrder, setSortOrder]    = useState<"asc" | "desc">("desc");
   const [loading, setLoading]        = useState(false);
+  const [expanded, setExpanded]      = useState<string | null>(null);
 
   // Sync status when parent navigates here with a new filter
   useEffect(() => { setStatus(initialStatus); }, [initialStatus, filterSeq]);
 
+  // Debounce search input → query (250ms)
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(search), 250);
+    return () => clearTimeout(id);
+  }, [search]);
+
   const fetchRows = useCallback(async (page: number) => {
     setLoading(true);
     try {
-      const r = await LogService.GetMessages(sinceHours, page, 50, search, status, sortBy, sortOrder) as any;
+      const r = await LogService.GetMessages(sinceHours, page, 50, query, status, sortBy, sortOrder) as any;
       setRows(r.rows ?? []);
       setPagination(r.pagination ?? { page: 1, limit: 50, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, [sinceHours, search, status, sortBy, sortOrder]);
+  }, [sinceHours, query, status, sortBy, sortOrder]);
 
   useEffect(() => { if (refreshKey === 0) return; fetchRows(1); }, [fetchRows, refreshKey]);
 
@@ -128,7 +138,8 @@ export function ActivityTable({ refreshKey, sinceHours = 0, initialStatus = "", 
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {/* Spinner only on first load — keep old rows visible during refetch (no flash) */}
+            {loading && rows.length === 0 ? (
               <tr><td colSpan={6} className="py-16 text-center">
                 <Loader2 className="w-5 h-5 animate-spin mx-auto" style={{ color: "#d4d4d8" }} />
               </td></tr>
@@ -136,13 +147,18 @@ export function ActivityTable({ refreshKey, sinceHours = 0, initialStatus = "", 
               <tr><td colSpan={6} className="py-2">
                 <EmptyState icon="mail" title="No messages found" subtitle="Try adjusting your filters" compact />
               </td></tr>
-            ) : rows.map((row, i) => (
-              <tr key={`${row.queueId}-${row.to}-${i}`}
-                className="transition-colors hover:bg-zinc-50/60"
-                style={{ borderBottom: "1px solid #f4f4f5" }}>
+            ) : rows.map((row, i) => {
+              const rowKey = `${row.queueId}-${row.to}-${i}`;
+              const isOpen = expanded === rowKey;
+              return [
+              <tr key={rowKey}
+                className="transition-colors hover:bg-zinc-50/60 cursor-pointer"
+                style={{ borderBottom: isOpen ? "none" : "1px solid #f4f4f5" }}
+                onClick={() => setExpanded(isOpen ? null : rowKey)}>
 
                 {/* Time */}
                 <td className="px-4 py-2.5 text-xs tabular-nums whitespace-nowrap" style={{ color: "#71717a" }}>
+                  <ChevronDown className="w-3 h-3 inline mr-1 transition-transform" style={{ color: "#d4d4d8", transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }} />
                   {new Date(row.time).toLocaleTimeString("en-GB", { hour12: false })}
                 </td>
 
@@ -172,8 +188,24 @@ export function ActivityTable({ refreshKey, sinceHours = 0, initialStatus = "", 
                 <td className="px-4 py-2.5 text-xs tabular-nums" style={{ color: "#71717a" }}>
                   {fmtDelay(row.processTime)}
                 </td>
+              </tr>,
+              isOpen && (
+              <tr key={`${rowKey}-detail`} style={{ background: "#fafafa", borderBottom: "1px solid #f4f4f5" }}>
+                <td colSpan={6} className="px-4 py-3">
+                  <div className="flex items-start gap-2 text-xs">
+                    <span className="font-semibold uppercase tracking-wider shrink-0" style={{ color: "#a1a1aa", fontSize: "10px", paddingTop: "1px" }}>Response</span>
+                    {row.dsn && (
+                      <span className="font-mono shrink-0" style={{ padding: "1px 6px", borderRadius: "4px", background: "#f4f4f5", fontSize: "10px", color: "#71717a" }}>{row.dsn}</span>
+                    )}
+                    <span style={{ color: "#52525b", wordBreak: "break-word" }}>
+                      {row.smtpMsg || <span style={{ color: "#d4d4d8" }}>No server response recorded</span>}
+                    </span>
+                  </div>
+                </td>
               </tr>
-            ))}
+              )
+              ];
+            })}
           </tbody>
         </table>
       </div>

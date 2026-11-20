@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // ──────────────────────────────────────────────
@@ -10,10 +11,11 @@ import (
 // ──────────────────────────────────────────────
 
 type logStore struct {
-	mu        sync.RWMutex
-	logs      []ParsedLogEntry
-	seenIDs   map[string]struct{}
-	maxTs     int64 // cached max timestamp — updated on every add(), avoids O(n) scan
+	mu      sync.RWMutex
+	logs    []ParsedLogEntry
+	seenIDs map[string]struct{}
+	maxTs   int64 // cached max timestamp — updated on every add(), avoids O(n) scan
+	minTs   int64 // cached min non-zero timestamp — same deal
 
 	// NDR/DSN queue IDs — populated when qmgr sees from=<>.
 	// All entries for these queue IDs are excluded from every metric.
@@ -23,16 +25,21 @@ type logStore struct {
 	// Delivery lines (smtp/lmtp) don't carry from=; we look it up here.
 	queueFrom map[string]string
 
-	// cachedSummaries is pre-computed at ingest-end; GetQueueSummaries returns it in O(1).
-	// Key: sinceHours (0, 1, 6, 24).
-	cachedSummaries map[int][]QueueSummary
+	// Generation-keyed query cache (queries.go): full-store scan results, keyed by
+	// query name + args + queryGen. add()/clear() bump queryGen and drop queryCache,
+	// so a cache hit always reflects the current store contents. Pre-warming a query
+	// (e.g. queue summaries at ingest-end) just means calling its get* method.
+	cacheMu    sync.Mutex // guards queryCache (concurrent readers hold only RLock)
+	queryGen   atomic.Uint64
+	queryCache map[string]any
 }
 
 func newLogStore() *logStore {
 	return &logStore{
-		seenIDs:   make(map[string]struct{}),
-		ndrQueues: make(map[string]struct{}),
-		queueFrom: make(map[string]string),
+		seenIDs:    make(map[string]struct{}),
+		ndrQueues:  make(map[string]struct{}),
+		queueFrom:  make(map[string]string),
+		queryCache: make(map[string]any),
 	}
 }
 
@@ -40,16 +47,22 @@ func newLogStore() *logStore {
 func (s *logStore) add(e *ParsedLogEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.addLocked(e)
+}
 
+func (s *logStore) addLocked(e *ParsedLogEntry) {
 	if _, seen := s.seenIDs[e.ID]; seen {
 		return
 	}
 	s.seenIDs[e.ID] = struct{}{}
 	s.logs = append(s.logs, *e)
 
-	// Keep maxTs up to date so callers pay O(1) instead of O(n).
+	// Keep maxTs/minTs up to date so callers pay O(1) instead of O(n).
 	if e.Timestamp > s.maxTs {
 		s.maxTs = e.Timestamp
+	}
+	if e.Timestamp > 0 && (s.minTs == 0 || e.Timestamp < s.minTs) {
+		s.minTs = e.Timestamp
 	}
 
 	// Track NDR/DSN queue IDs so all metric queries can exclude them in one place.
@@ -63,45 +76,35 @@ func (s *logStore) add(e *ParsedLogEntry) {
 			s.queueFrom[e.QueueID] = e.From
 		}
 	}
+
+	// Content changed — bump generation and drop the query cache. During ingest the
+	// cache is empty, so the drop only fires once queries have actually populated it.
+	s.queryGen.Add(1)
+	s.cacheMu.Lock()
+	if len(s.queryCache) > 0 {
+		s.queryCache = make(map[string]any)
+	}
+	s.cacheMu.Unlock()
 }
 
 // clear resets the store to empty.
 func (s *logStore) clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.clearLocked()
+}
+
+func (s *logStore) clearLocked() {
 	s.logs = nil
 	s.maxTs = 0
+	s.minTs = 0
 	s.seenIDs = make(map[string]struct{})
 	s.ndrQueues = make(map[string]struct{})
 	s.queueFrom = make(map[string]string)
-	s.cachedSummaries = nil
-}
-
-// setCachedSummaries stores a pre-computed summary snapshot for a given sinceHours key.
-func (s *logStore) setCachedSummaries(key int, summaries []QueueSummary) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cachedSummaries == nil {
-		s.cachedSummaries = make(map[int][]QueueSummary)
-	}
-	s.cachedSummaries[key] = summaries
-}
-
-// getCachedSummaries returns a copy of the cached snapshot for the given key (nil if not yet built).
-// A copy is returned so callers can freely slice/filter without mutating the cache backing array.
-func (s *logStore) getCachedSummaries(key int) []QueueSummary {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.cachedSummaries == nil {
-		return nil
-	}
-	src := s.cachedSummaries[key]
-	if src == nil {
-		return nil
-	}
-	out := make([]QueueSummary, len(src))
-	copy(out, src)
-	return out
+	s.queryGen.Add(1)
+	s.cacheMu.Lock()
+	s.queryCache = make(map[string]any)
+	s.cacheMu.Unlock()
 }
 
 // isNDR returns true if the entry is an NDR/DSN and should be excluded from metrics.
@@ -121,6 +124,13 @@ func (s *logStore) maxTimestamp() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.maxTs
+}
+
+// timeRange returns (min, max) entry timestamps (unix ms). O(1) — maintained by add().
+func (s *logStore) timeRange() (int64, int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.minTs, s.maxTs
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -157,8 +167,12 @@ func sortedCountSeries(m map[int64]int) []TimeSeriesPoint {
 	var minK, maxK int64
 	first := true
 	for k := range m {
-		if first || k < minK { minK = k }
-		if first || k > maxK { maxK = k }
+		if first || k < minK {
+			minK = k
+		}
+		if first || k > maxK {
+			maxK = k
+		}
 		first = false
 	}
 	// Emit every 5-minute bucket in range, filling missing buckets with 0

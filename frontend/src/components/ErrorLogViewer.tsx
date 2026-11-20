@@ -62,7 +62,7 @@ export function ErrorLogViewer({ refreshKey, sinceHours = 0, initialType = "all"
 
       {/* ── Scrollable body — padded ── */}
       <div className="flex-1 overflow-y-auto">
-        {loading ? (
+        {loading && filtered.length === 0 ? (
           <div className="py-16 flex justify-center">
             <Loader2 className="w-5 h-5 animate-spin text-zinc-300" />
           </div>

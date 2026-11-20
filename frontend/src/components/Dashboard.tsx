@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import {
   Mail,
   Clock,
@@ -18,6 +18,8 @@ import {
   Users,
   Cloud,
   Sparkles,
+  ShieldAlert,
+  Trash2,
 } from "lucide-react";
 import {
   usePostfixLogs,
@@ -44,6 +46,8 @@ import { TopDomainsTable } from "./TopDomainsTable";
 import { RawLogViewer } from "./RawLogViewer";
 import { VolumeInsightsChart } from "./VolumeInsightsChart";
 import { RelayInsightsPanel } from "./RelayInsightsPanel";
+import { GarbagePanel } from "./GarbagePanel";
+import { WarnMonitorPanel } from "./WarnMonitorPanel";
 import LogSourcePanel from "./LogSourcePanel";
 import { NativeSelect } from "@/components/ui/select";
 
@@ -56,6 +60,8 @@ type Tab =
   | "qmgr"
   | "queue"
   | "relays"
+  | "garbage"
+  | "warnmonitor"
   | "errors"
   | "rawlog"
   | "logsource";
@@ -84,6 +90,8 @@ const NAV: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "qmgr", label: "Qmgr", icon: BarChart2 },
   { id: "queue", label: "Mail Queue", icon: Inbox },
   { id: "relays", label: "Relays", icon: Network },
+  { id: "garbage", label: "Garbage", icon: Trash2 },
+  { id: "warnmonitor", label: "Warn Monitor", icon: ShieldAlert },
   { id: "errors", label: "Diagnostics", icon: AlertCircle },
   { id: "rawlog", label: "Raw Log", icon: ScrollText },
   { id: "logsource", label: "Log Source", icon: Cloud },
@@ -98,10 +106,43 @@ const TAB_TITLE: Record<Tab, string> = {
   qmgr: "Queue Manager",
   queue: "Mail Queue",
   relays: "Relay Insights",
+  garbage: "Garbage Traffic",
+  warnmonitor: "warn_if_reject Monitor",
   errors: "Diagnostics",
   rawlog: "Raw Log",
   logsource: "Log Source",
 };
+
+/** Isolated clock — re-renders only itself every second, not the whole Dashboard tree. */
+function LiveClock() {
+  const [now, setNow] = useState(() =>
+    new Date().toLocaleTimeString("en-US", { hour12: false }),
+  );
+  useEffect(() => {
+    const id = setInterval(
+      () => setNow(new Date().toLocaleTimeString("en-US", { hour12: false })),
+      1000,
+    );
+    return () => clearInterval(id);
+  }, []);
+  return <>{now}</>;
+}
+
+// Tab panels stay mounted but hidden; memo makes a tab switch a pure CSS flip
+// (props only change on refresh/sinceHours, which still propagates).
+const MVolumeInsightsChart = memo(VolumeInsightsChart);
+const MDelayInsightsChart = memo(DelayInsightsChart);
+const MQmgrActivityChart = memo(QmgrActivityChart);
+const MRetryTimelinePanel = memo(RetryTimelinePanel);
+const MActivityTable = memo(ActivityTable);
+const MQueueSummaryTable = memo(QueueSummaryTable);
+const MMailQueueTable = memo(MailQueueTable);
+const MRelayInsightsPanel = memo(RelayInsightsPanel);
+const MGarbagePanel = memo(GarbagePanel);
+const MWarnMonitorPanel = memo(WarnMonitorPanel);
+const MIPReputationPanel = memo(IPReputationPanel);
+const MErrorLogViewer = memo(ErrorLogViewer);
+const MRawLogViewer = memo(RawLogViewer);
 
 export default function Dashboard() {
   const {
@@ -121,7 +162,6 @@ export default function Dashboard() {
   const [mountedTabs, setMountedTabs] = useState<Set<Tab>>(
     new Set(["overview"]),
   );
-  const [currentTime, setCurrentTime] = useState("");
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [delayInsights, setDelayInsights] = useState<any>(null);
   const [volumeInsights, setVolumeInsights] = useState<any>(null);
@@ -156,14 +196,6 @@ export default function Dashboard() {
     setDiagFilter(type);
     switchTab("errors");
   };
-
-  useEffect(() => {
-    const tick = () =>
-      setCurrentTime(new Date().toLocaleTimeString("en-US", { hour12: false }));
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, []);
 
   useEffect(() => {
     void fetchAvailableFiles();
@@ -215,14 +247,14 @@ export default function Dashboard() {
   return (
     <div
       className="flex overflow-hidden p-2.5 gap-2"
-      style={{ background: "#d8d8de", height: "100%" }}
+      style={{ background: "var(--content-canvas)", height: "100%" }}
     >
       {/* ── Sidebar panel ───────────────────────────────────────────────── */}
       <aside
         className="w-52.5 shrink-0 flex flex-col rounded-2xl overflow-hidden"
         style={{
-          background: "#1e1e20",
-          boxShadow: "inset 0 0 0 1px rgba(255,255,255,.07)",
+          background: "linear-gradient(180deg, #191c22 0%, #13151a 100%)",
+          boxShadow: "inset 0 0 0 1px rgba(255,255,255,.06)",
         }}
       >
         {/* macOS traffic light drag zone — sits above brand */}
@@ -237,7 +269,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-2.5">
               <div
                 className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-                style={{ background: "rgba(16,185,129,0.18)" }}
+                style={{ background: "rgba(16,185,129,0.2)", boxShadow: "0 0 14px rgba(16,185,129,.35), inset 0 0 0 1px rgba(16,185,129,.25)" }}
               >
                 <Mail className="w-3.5 h-3.5" style={{ color: "#10b981" }} />
               </div>
@@ -369,13 +401,15 @@ export default function Dashboard() {
           style={{ borderTop: "1px solid rgba(255,255,255,.08)" }}
         >
           <div className="flex items-center justify-between px-1">
-            <button
-              onClick={() => setIsUpdaterOpen(true)}
-              className="text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
-              title="Check for updates from GitHub Releases"
-            >
-              v{versionInfo?.version || "1.0.0"}
-            </button>
+            {updateCheckResult?.hasUpdate && (
+              <button
+                onClick={() => setIsUpdaterOpen(true)}
+                className="text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                title="Check for updates from GitHub Releases"
+              >
+                v{versionInfo?.version || "1.0.0"}
+              </button>
+            )}
             {updateCheckResult?.hasUpdate && (
               <button
                 onClick={() => setIsUpdaterOpen(true)}
@@ -390,7 +424,7 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 px-1">
             <Clock className="w-3 h-3 text-zinc-400" />
             <span className="text-xs font-mono text-zinc-200">
-              {currentTime}
+              <LiveClock />
             </span>
             <span
               className="ml-auto text-[10px] font-semibold"
@@ -405,19 +439,19 @@ export default function Dashboard() {
       {/* ── Content panel ──────────────────────────────────────────────── */}
       <div
         className="flex-1 flex flex-col overflow-hidden rounded-2xl"
-        style={{ background: "#f5f5f7", boxShadow: "none" }}
+        style={{ background: "var(--content-panel-bg)", boxShadow: "var(--shadow-panel)" }}
       >
         {/* Topbar */}
         <div
           className="shrink-0 h-13 flex items-center px-5 gap-3 bg-white"
           style={
             {
-              borderBottom: "1px solid #e4e4e7",
+              borderBottom: "1px solid var(--content-border)",
               WebkitAppRegion: "drag",
             } as React.CSSProperties
           }
         >
-          <h1 className="flex-1 text-[14px] font-semibold text-zinc-800">
+          <h1 className="flex-1 text-[15px] font-semibold tracking-[-0.01em] text-zinc-800">
             {TAB_TITLE[tab]}
           </h1>
 
@@ -582,7 +616,7 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden flex flex-col"
               style={{ display: tab === "volume" ? "flex" : "none" }}
             >
-              <VolumeInsightsChart
+              <MVolumeInsightsChart
                 data={volumeInsights}
                 sinceHours={sinceHours}
               />
@@ -598,21 +632,21 @@ export default function Dashboard() {
               {/* Left: Delay Insights chart */}
               <div className="flex-1 min-w-0 rounded-xl border border-zinc-100 overflow-y-auto">
                 {delayInsights && (
-                  <DelayInsightsChart delayInsights={delayInsights} />
+                  <MDelayInsightsChart delayInsights={delayInsights} />
                 )}
               </div>
               {/* Right: Retry Timeline */}
               <div className="w-72 shrink-0 rounded-xl border border-zinc-100 bg-white overflow-hidden flex flex-col">
                 <div className="px-5 py-3.5 border-b border-zinc-100 shrink-0">
                   <h3 className="text-sm font-semibold text-zinc-800">
-                    Retry Timeline
+                    Message Journey
                   </h3>
                   <p className="text-xs mt-0.5 text-zinc-400">
-                    Delivery attempts per queue ID
+                    Search any queue ID or recipient
                   </p>
                 </div>
                 <div className="flex-1 min-h-0 overflow-hidden">
-                  <RetryTimelinePanel sinceHours={sinceHours} refreshKey={refreshKey} />
+                  <MRetryTimelinePanel sinceHours={sinceHours} refreshKey={refreshKey} />
                 </div>
               </div>
             </div>
@@ -625,7 +659,7 @@ export default function Dashboard() {
               style={{ display: tab === "qmgr" ? "block" : "none" }}
             >
               {metrics && (
-                <QmgrActivityChart
+                <MQmgrActivityChart
                   activeData={metrics.qmgrActiveHistory ?? []}
                   removedData={metrics.qmgrRemovedHistory ?? []}
                 />
@@ -639,7 +673,7 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "activity" ? "block" : "none" }}
             >
-              <ActivityTable
+              <MActivityTable
                 refreshKey={refreshKey}
                 sinceHours={sinceHours}
                 initialStatus={activityFilter}
@@ -654,7 +688,7 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "queuesummary" ? "block" : "none" }}
             >
-              <QueueSummaryTable
+              <MQueueSummaryTable
                 sinceHours={sinceHours}
                 refreshKey={refreshKey}
               />
@@ -667,7 +701,7 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "queue" ? "block" : "none" }}
             >
-              <MailQueueTable refreshKey={refreshKey} />
+              <MMailQueueTable refreshKey={refreshKey} />
             </div>
           )}
 
@@ -677,7 +711,33 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden flex flex-col"
               style={{ display: tab === "relays" ? "flex" : "none" }}
             >
-              <RelayInsightsPanel
+              <MRelayInsightsPanel
+                sinceHours={sinceHours}
+                refreshKey={refreshKey}
+              />
+            </div>
+          )}
+
+          {/* Garbage — flagged recipients/senders */}
+          {mountedTabs.has("garbage") && (
+            <div
+              className="absolute inset-0 overflow-hidden flex flex-col"
+              style={{ display: tab === "garbage" ? "flex" : "none" }}
+            >
+              <MGarbagePanel
+                sinceHours={sinceHours}
+                refreshKey={refreshKey}
+              />
+            </div>
+          )}
+
+          {/* warn_if_reject Monitor — RCPT-stage policy events */}
+          {mountedTabs.has("warnmonitor") && (
+            <div
+              className="absolute inset-0 overflow-hidden flex flex-col bg-zinc-50"
+              style={{ display: tab === "warnmonitor" ? "block" : "none" }}
+            >
+              <MWarnMonitorPanel
                 sinceHours={sinceHours}
                 refreshKey={refreshKey}
               />
@@ -706,7 +766,7 @@ export default function Dashboard() {
                   className="flex-1 overflow-y-auto p-4"
                   style={{ position: "relative" }}
                 >
-                  <IPReputationPanel
+                  <MIPReputationPanel
                     sinceHours={sinceHours}
                     refreshKey={refreshKey}
                   />
@@ -714,7 +774,7 @@ export default function Dashboard() {
               </div>
               {/* Right: Error log */}
               <div className="flex-1 min-w-0 rounded-xl border border-zinc-100 bg-white overflow-hidden">
-                <ErrorLogViewer
+                <MErrorLogViewer
                   refreshKey={refreshKey}
                   sinceHours={sinceHours}
                   initialType={diagFilter}
@@ -729,7 +789,7 @@ export default function Dashboard() {
               className="absolute inset-0 overflow-hidden"
               style={{ display: tab === "rawlog" ? "block" : "none" }}
             >
-              <RawLogViewer
+              <MRawLogViewer
                 refreshKey={refreshKey}
                 selectedFile={selectedFile}
               />

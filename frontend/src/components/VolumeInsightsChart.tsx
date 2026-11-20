@@ -47,7 +47,44 @@ interface VolumeInsights {
   hourly: HourlyVolume[];
   deferReasons: Reason[];
   bounceReasons: Reason[];
+  deferBuckets: Reason[];
+  bounceBuckets: Reason[];
   failingDomains: DomainDelivery[];
+}
+
+const BUCKET_COLORS: Record<string, string> = {
+  "Block / reputation": "#e11d48",
+  "Hard bounce": "#fb7185",
+  "Connection / network": "#0ea5e9",
+  "Soft / temporary": "#f59e0b",
+  "Other": "#a1a1aa",
+};
+
+// BucketStrip shows the coarse bounce taxonomy above the fine reason list —
+// the instant "what kind of problem is this" read.
+function BucketStrip({ buckets, onDrill }: { buckets: Reason[]; onDrill: (bucket: string) => void }) {
+  if (!buckets?.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mb-3">
+      {buckets.map(b => {
+        const color = BUCKET_COLORS[b.reason] ?? "#a1a1aa";
+        return (
+          <button
+            key={b.reason}
+            onClick={() => onDrill(b.reason)}
+            title={`See all "${b.reason}" messages`}
+            className="flex items-center gap-1.5 text-[11px] font-medium px-2 py-1 rounded-full hover:opacity-80 transition-opacity"
+            style={{ background: `${color}14`, color }}
+          >
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
+            {b.reason}
+            <span className="tabular-nums">{b.count.toLocaleString()}</span>
+            <span style={{ opacity: 0.7 }}>{b.percent.toFixed(0)}%</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 const C = {
@@ -238,6 +275,7 @@ export function VolumeInsightsChart({
   const [drillReason, setDrillReason] = useState<{
     reason: string;
     status: "deferred" | "bounced";
+    bucket?: boolean;
   } | null>(null);
   const [drillSender, setDrillSender] = useState<string | null>(null);
   const [senderStats, setSenderStats] = useState<SenderStat[]>([]);
@@ -259,6 +297,11 @@ export function VolumeInsightsChart({
   );
   const onDrillBounce = useCallback(
     (reason: string) => setDrillReason({ reason, status: "bounced" }),
+    [],
+  );
+  const onDrillBucket = useCallback(
+    (bucket: string, status: "deferred" | "bounced") =>
+      setDrillReason({ reason: bucket, status, bucket: true }),
     [],
   );
   const closeReason = useCallback(() => setDrillReason(null), []);
@@ -368,8 +411,15 @@ export function VolumeInsightsChart({
                 status="deferred"
                 sinceHours={sinceHours}
                 onClose={closeReason}
+                title={drillReason.bucket ? drillReason.reason : undefined}
+                fetchFn={
+                  drillReason.bucket
+                    ? (h: number) => LogService.GetMessagesByBucket(drillReason.reason, "deferred", h) as any
+                    : undefined
+                }
               />
             )}
+            <BucketStrip buckets={data.deferBuckets} onDrill={(b) => onDrillBucket(b, "deferred")} />
             <ReasonList
               items={data.deferReasons}
               colors={deferColors}
@@ -389,8 +439,15 @@ export function VolumeInsightsChart({
                 status="bounced"
                 sinceHours={sinceHours}
                 onClose={closeReason}
+                title={drillReason.bucket ? drillReason.reason : undefined}
+                fetchFn={
+                  drillReason.bucket
+                    ? (h: number) => LogService.GetMessagesByBucket(drillReason.reason, "bounced", h) as any
+                    : undefined
+                }
               />
             )}
+            <BucketStrip buckets={data.bounceBuckets} onDrill={(b) => onDrillBucket(b, "bounced")} />
             <ReasonList
               items={data.bounceReasons}
               colors={bounceColors}

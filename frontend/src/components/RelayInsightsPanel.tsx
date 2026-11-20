@@ -9,7 +9,7 @@ interface RelayStat {
   total: number; failRate: number; kind: string; topDsn: string; lastMessage: string;
 }
 interface RelayInsights { throttling: RelayStat[]; blocking: RelayStat[]; healthy: RelayStat[]; }
-interface RelayMessage  { timestamp: number; to: string; status: string; dsn: string; message: string; }
+interface RelayMessage  { timestamp: number; to: string; from: string; queueId: string; status: string; dsn: string; message: string; }
 
 // ── Status badge ────────────────────────────────────────────────────────────
 const STATUS_COLOR: Record<string, string> = { sent: "#10b981", deferred: "#d97706", bounced: "#e11d48" };
@@ -55,7 +55,7 @@ function RelayMessageDrilldown({ relay, status, sinceHours, onClose }: {
           <table style={{ width: "100%", fontSize: "11px", borderCollapse: "collapse" }}>
             <thead style={{ position: "sticky", top: 0 }}>
               <tr style={{ background: "#fafafa", borderBottom: "1px solid #f4f4f5" }}>
-                {["Time", "Recipient", "Status", "DSN", "Server Response"].map((h, i) => (
+                {["Time", "Queue ID", "From", "Recipient", "Status", "DSN", "Server Response"].map((h, i) => (
                   <th key={h} style={{ padding: "6px 12px", textAlign: "left", fontWeight: 600, color: "#a1a1aa", fontSize: "10px", letterSpacing: "0.06em", textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -64,6 +64,12 @@ function RelayMessageDrilldown({ relay, status, sinceHours, onClose }: {
               {rows.map((r, i) => (
                 <tr key={i} style={{ borderBottom: "1px solid #f4f4f5", background: i % 2 === 0 ? "#fff" : "#fafafa" }}>
                   <td style={{ padding: "6px 12px", color: "#a1a1aa", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{fmt(r.timestamp)}</td>
+                  <td style={{ padding: "6px 12px", whiteSpace: "nowrap" }}>
+                    <span style={{ padding: "1px 6px", borderRadius: "4px", background: "#f4f4f5", fontFamily: "monospace", fontSize: "10px", color: "#71717a" }}>{r.queueId || "—"}</span>
+                  </td>
+                  <td style={{ padding: "6px 12px", maxWidth: "180px" }}>
+                    <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#3f3f46" }} title={r.from}>{r.from || "—"}</span>
+                  </td>
                   <td style={{ padding: "6px 12px", maxWidth: "180px" }}>
                     <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#3f3f46" }} title={r.to}>{r.to}</span>
                   </td>

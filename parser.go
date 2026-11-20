@@ -24,6 +24,13 @@ var delaysPattern = regexp.MustCompile(`delays=([\d.]+)\/([\d.]+)\/([\d.]+)\/([\
 var sizePattern = regexp.MustCompile(`size=(\d+)`)
 var nrcptPattern = regexp.MustCompile(`nrcpt=(\d+)`)
 
+// RCPT-stage policy rejects from smtpd (NOQUEUE — no queue ID assigned):
+//   NOQUEUE: reject_warning: RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; from=<s> to=<r> proto=...
+//   NOQUEUE: reject:         RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; ...
+// reject_warning = warn_if_reject downgrade (mail accepted, would-be-rejected);
+// reject = enforced RCPT-stage rejection (bad_rcpt table, enforced DNS check, …).
+var rcptRejectPattern = regexp.MustCompile(`^NOQUEUE: (reject_warning|reject): RCPT from ([^\[:]+)(?:\[([^\]]*)\])?: (\d{3} \d\.\d\.\d+) <([^>]*)>: ([^;]+)`)
+
 // parsePostfixLog parses a single log line. For multi-line files spanning year boundaries,
 // use parsePostfixLogWithState which tracks month regression (Dec→Jan) to detect year crossings.
 func parsePostfixLog(rawLog string) *ParsedLogEntry {
@@ -35,7 +42,14 @@ func parsePostfixLog(rawLog string) *ParsedLogEntry {
 // yearOffset: pointer to cumulative year offset from base year, updated when Dec→Jan crossing detected.
 // Base year defaults to current UTC year; caller can pre-set yearOffset if file mtime suggests a different base.
 func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *ParsedLogEntry {
-	if !strings.Contains(rawLog, "postfix/qmgr[") &&
+	// RCPT-stage policy lines from smtpd: warn_if_reject downgrades and hard
+	// NOQUEUE rejects. Everything else from smtpd is ignored — admitting all
+	// smtpd traffic would flood the store with connect/disconnect noise.
+	isSmtpdPolicyLine := strings.Contains(rawLog, "postfix/smtpd[") &&
+		(strings.Contains(rawLog, "reject_warning: RCPT from") ||
+			strings.Contains(rawLog, "reject: RCPT from"))
+	if !isSmtpdPolicyLine &&
+		!strings.Contains(rawLog, "postfix/qmgr[") &&
 		!strings.Contains(rawLog, "postfix/smtp[") &&
 		!strings.Contains(rawLog, "postfix/error[") {
 		return nil
@@ -110,6 +124,35 @@ func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *P
 		entry.RawLog = rawLog
 	}
 
+	// RCPT-stage policy events (smtpd only): parse and return early — these
+	// lines never carry delivery fields (status/delay/size), and we must not
+	// run the generic delivery-line extraction on them.
+	if service == "smtpd" {
+		if m := rcptRejectPattern.FindStringSubmatch(message); m != nil {
+			entry.Status = "warned"
+			if m[1] == "reject" {
+				entry.Status = "rejected"
+			}
+			entry.Relay = m[2]
+			if m[3] != "" {
+				entry.Relay = m[2] + "[" + m[3] + "]"
+			}
+			entry.DSN = m[4]
+			entry.To = m[5]
+			entry.SMTPMsg = strings.TrimSpace(m[6])
+			entry.RawLog = rawLog
+			if fm := fromPattern.FindStringSubmatch(message); fm != nil {
+				if fm[1] == "" {
+					entry.From = "<>"
+				} else {
+					entry.From = fm[1]
+				}
+			}
+			return entry
+		}
+		return nil // smtpd line that looked like policy but isn't parseable
+	}
+
 	if m := queueIDPattern.FindStringSubmatch(message); m != nil {
 		entry.QueueID = m[1]
 	}
@@ -171,6 +214,17 @@ func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *P
 		entry.Status = "removed"
 	case strings.Contains(msgLower, "queue active"):
 		entry.Status = "active"
+	}
+
+	// Precompute reason + taxonomy bucket once — queries re-use these instead of
+	// re-running regex rules over RawLog on every scan.
+	switch entry.Status {
+	case "deferred":
+		entry.DeferReason = extractDeferReason(entry.RawLog)
+		entry.DeferBucket = classifyBucket(entry.DeferReason, "deferred", entry.DSN)
+	case "bounced":
+		entry.BounceReason = extractBounceReason(entry.RawLog)
+		entry.BounceBucket = classifyBucket(entry.BounceReason, "bounced", entry.DSN)
 	}
 
 	if m := delayPattern.FindStringSubmatch(message); m != nil {
@@ -301,6 +355,62 @@ func extractBounceReason(raw string) string {
 	}
 	if r := matchReason(strings.ToLower(raw), bounceRules); r != "" {
 		return r
+	}
+	return "Other"
+}
+
+// ── Bounce taxonomy — the "what kind of problem is this" layer above fine reasons ──
+
+// reasonBuckets maps an extracted defer/bounce reason to its coarse taxonomy bucket.
+var reasonBuckets = map[string]string{
+	// deferred + shared
+	"Network unreachable (IPv6)":  "Connection / network",
+	"DNS failure":                 "Connection / network",
+	"Connection refused":          "Connection / network",
+	"Lost connection":             "Connection / network",
+	"Timeout":                     "Connection / network",
+	"TLS error":                   "Connection / network",
+	"Rate limited":                "Soft / temporary",
+	"Server busy (M365)":          "Soft / temporary",
+	"Greylisted":                  "Soft / temporary",
+	"Unauthenticated":             "Soft / temporary",
+	"Mailbox full":                "Soft / temporary",
+	"Remote server error":         "Soft / temporary",
+	"Unknown recipient":           "Soft / temporary", // deferred on 4.1.x — still retrying
+	"Policy block":                "Block / reputation",
+	"IP/domain blocked":           "Block / reputation",
+	// bounced
+	"Unknown user (5.1.1)":        "Hard bounce",
+	"Mailbox not found (5.0.0)":   "Hard bounce",
+	"Inactive account (5.2.1)":    "Hard bounce",
+	"Mailbox full (5.2.2)":        "Hard bounce",
+	"Address rejected (5.4.1)":    "Hard bounce",
+	"Address rejected (5.1.0)":    "Hard bounce",
+	"Policy rejection (5.7.1)":    "Block / reputation",
+	"Bad destination (5.1.2)":     "Hard bounce",
+	"Auth/policy failure (5.7.x)": "Block / reputation",
+	"Service unavailable (5.3.x)": "Hard bounce",
+}
+
+// classifyBucket maps an extracted reason to a taxonomy bucket, falling back
+// to the DSN family (5.x.x permanent, 4.x.x temporary) and finally "Other".
+func classifyBucket(reason, status, dsn string) string {
+	if reason != "" && reason != "Other" {
+		if b, ok := reasonBuckets[reason]; ok {
+			return b
+		}
+		if status == "bounced" {
+			return "Hard bounce"
+		}
+		if status == "deferred" {
+			return "Soft / temporary"
+		}
+	}
+	if strings.HasPrefix(dsn, "5.") {
+		return "Hard bounce"
+	}
+	if strings.HasPrefix(dsn, "4.") {
+		return "Soft / temporary"
 	}
 	return "Other"
 }

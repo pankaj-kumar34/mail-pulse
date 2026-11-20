@@ -175,7 +175,7 @@ export function QueueSummaryTable({ sinceHours, refreshKey }: Props) {
 
       {/* Table */}
       <div className="flex-1 overflow-y-auto">
-        {loading ? (
+        {loading && filtered.length === 0 ? (
           <div className="flex items-center justify-center h-32 text-zinc-400 text-sm">Loading…</div>
         ) : filtered.length === 0 ? (
           <div className="p-8"><EmptyState icon="inbox" title="No queues found" subtitle="Load a log file or adjust filters" compact /></div>

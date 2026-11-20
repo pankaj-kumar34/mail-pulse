@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -15,18 +16,18 @@ import (
 // ──────────────────────────────────────────────
 
 // getMetrics computes delivery metrics for entries with timestamp >= since.
-func (s *logStore) getMetrics(since int64) Metrics {
+func (s *logStore) computeMetrics(since int64) Metrics {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var (
-		totalRemoved int
+		totalRemoved             int
 		errorCount, warningCount int
 		delaySum, delayCount     float64
-		senderDomains    = make(map[string]int)
-		recipientDomains = make(map[string]int)
-		qmgrActive       = make(map[int64]int)
-		qmgrRemoved      = make(map[int64]int)
+		senderDomains            = make(map[string]int)
+		recipientDomains         = make(map[string]int)
+		qmgrActive               = make(map[int64]int)
+		qmgrRemoved              = make(map[int64]int)
 	)
 
 	// Per queueID+recipient final status: priority sent > bounced > deferred.
@@ -41,35 +42,54 @@ func (s *logStore) getMetrics(since int64) Metrics {
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
 
 		min1 := e.Timestamp / 300000 // 5-minute bucket
 		switch e.Status {
 		case "sent":
 			if e.QueueID != "" {
 				k := qKey{e.QueueID, e.To}
-				if qFinal[k] < statusSent { qFinal[k] = statusSent }
+				if qFinal[k] < statusSent {
+					qFinal[k] = statusSent
+				}
 			}
 		case "deferred":
 			if e.QueueID != "" {
 				k := qKey{e.QueueID, e.To}
-				if qFinal[k] < statusDeferred { qFinal[k] = statusDeferred }
+				if qFinal[k] < statusDeferred {
+					qFinal[k] = statusDeferred
+				}
 			}
 		case "bounced":
 			if e.QueueID != "" {
 				k := qKey{e.QueueID, e.To}
-				if qFinal[k] < statusBounced { qFinal[k] = statusBounced }
+				if qFinal[k] < statusBounced {
+					qFinal[k] = statusBounced
+				}
 			}
 		case "removed":
-			totalRemoved++; qmgrRemoved[min1]++
+			totalRemoved++
+			qmgrRemoved[min1]++
 		case "active":
 			qmgrActive[min1]++
 		}
-		if e.IsError   { errorCount++ }
-		if e.IsWarning { warningCount++ }
-		if e.From != "" { senderDomains[extractDomain(e.From)]++ }
-		if e.To   != "" { recipientDomains[extractDomain(e.To)]++ }
+		if e.IsError {
+			errorCount++
+		}
+		if e.IsWarning {
+			warningCount++
+		}
+		if e.From != "" {
+			senderDomains[extractDomain(e.From)]++
+		}
+		if e.To != "" {
+			recipientDomains[extractDomain(e.To)]++
+		}
 		// Only smtp lines have delays breakdown — qmgr active lines skew averages
 		if e.Delay > 0 && e.Delays != nil {
 			delayCount++
@@ -81,17 +101,24 @@ func (s *logStore) getMetrics(since int64) Metrics {
 	var totalSent, totalDeferred, totalBounced int
 	for _, st := range qFinal {
 		switch st {
-		case statusSent:     totalSent++
-		case statusBounced:  totalBounced++
-		case statusDeferred: totalDeferred++
+		case statusSent:
+			totalSent++
+		case statusBounced:
+			totalBounced++
+		case statusDeferred:
+			totalDeferred++
 		}
 	}
 
 	avgDelay := 0.0
-	if delayCount > 0 { avgDelay = delaySum / delayCount }
+	if delayCount > 0 {
+		avgDelay = delaySum / delayCount
+	}
 	total := totalSent + totalDeferred + totalBounced
 	successRate := 0.0
-	if total > 0 { successRate = float64(totalSent) / float64(total) * 100 }
+	if total > 0 {
+		successRate = float64(totalSent) / float64(total) * 100
+	}
 
 	return Metrics{
 		TotalSent: totalSent, TotalDeferred: totalDeferred,
@@ -106,47 +133,92 @@ func (s *logStore) getMetrics(since int64) Metrics {
 }
 
 // getVolumeInsights computes hourly volume, defer/bounce reasons and failing domains.
-func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
+func (s *logStore) computeVolumeInsights(since int64) VolumeInsights {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	sentByHour     := make(map[int64]int)
+	sentByHour := make(map[int64]int)
 	deferredByHour := make(map[int64]int)
-	bouncedByHour  := make(map[int64]int)
-	deferReasons   := make(map[string]int)
-	bounceReasons  := make(map[string]int)
-	domainSent     := make(map[string]int)
+	bouncedByHour := make(map[int64]int)
+	deferReasons := make(map[string]int)
+	bounceReasons := make(map[string]int)
+	deferBuckets := make(map[string]int)
+	bounceBuckets := make(map[string]int)
+	domainSent := make(map[string]int)
 	domainDeferred := make(map[string]int)
-	domainBounced  := make(map[string]int)
+	domainBounced := make(map[string]int)
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
 
-		hour1 := time.UnixMilli(e.Timestamp).Local().Truncate(time.Hour).Unix()
+		// Bucket by local clock hour — Truncate() is UTC-epoch based and misaligns
+		// buckets by the sub-hour part of the local offset (e.g. IST +5:30 → :30 buckets).
+		lt := time.UnixMilli(e.Timestamp).Local()
+		hour1 := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, lt.Location()).Unix()
 		recip := extractDomain(e.To)
 		switch e.Status {
 		case "sent":
 			sentByHour[hour1]++
-			if recip != "" { domainSent[recip]++ }
+			if recip != "" {
+				domainSent[recip]++
+			}
 		case "deferred":
 			deferredByHour[hour1]++
-			if recip != "" { domainDeferred[recip]++ }
-			if r := extractDeferReason(e.RawLog); r != "" { deferReasons[r]++ }
+			if recip != "" {
+				domainDeferred[recip]++
+			}
+			if r := e.DeferReason; r != "" {
+				deferReasons[r]++
+				deferBuckets[e.DeferBucket]++
+			}
 		case "bounced":
 			bouncedByHour[hour1]++
-			if recip != "" { domainBounced[recip]++ }
-			if r := extractBounceReason(e.RawLog); r != "" { bounceReasons[r]++ }
+			if recip != "" {
+				domainBounced[recip]++
+			}
+			if r := e.BounceReason; r != "" {
+				bounceReasons[r]++
+				bounceBuckets[e.BounceBucket]++
+			}
 		}
 	}
 
 	// Hourly volume series — emit ms timestamps, fill gaps with zeros
 	var minH, maxH int64
 	firstH := true
-	for h := range sentByHour     { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
-	for h := range deferredByHour { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
-	for h := range bouncedByHour  { if firstH || h < minH { minH = h }; if firstH || h > maxH { maxH = h }; firstH = false }
+	for h := range sentByHour {
+		if firstH || h < minH {
+			minH = h
+		}
+		if firstH || h > maxH {
+			maxH = h
+		}
+		firstH = false
+	}
+	for h := range deferredByHour {
+		if firstH || h < minH {
+			minH = h
+		}
+		if firstH || h > maxH {
+			maxH = h
+		}
+		firstH = false
+	}
+	for h := range bouncedByHour {
+		if firstH || h < minH {
+			minH = h
+		}
+		if firstH || h > maxH {
+			maxH = h
+		}
+		firstH = false
+	}
 	var hourly []HourlyVolume
 	if !firstH {
 		const secPerHour = int64(3600)
@@ -161,17 +233,26 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 	}
 
 	// Reasons helper
-	type rc struct{ r string; c int }
+	type rc struct {
+		r string
+		c int
+	}
 	toDeferReasons := func(m map[string]int) []DeferReason {
 		total := 0
-		for _, c := range m { total += c }
+		for _, c := range m {
+			total += c
+		}
 		pairs := make([]rc, 0, len(m))
-		for r, c := range m { pairs = append(pairs, rc{r, c}) }
+		for r, c := range m {
+			pairs = append(pairs, rc{r, c})
+		}
 		sort.Slice(pairs, func(i, j int) bool { return pairs[i].c > pairs[j].c })
 		out := make([]DeferReason, 0, len(pairs))
 		for _, p := range pairs {
 			pct := 0.0
-			if total > 0 { pct = float64(p.c) / float64(total) * 100 }
+			if total > 0 {
+				pct = float64(p.c) / float64(total) * 100
+			}
 			out = append(out, DeferReason{Reason: p.r, Count: p.c, Percent: pct})
 		}
 		return out
@@ -179,15 +260,25 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 
 	// Failing domains (top 20 by fail rate, min 5 messages)
 	domSet := make(map[string]struct{})
-	for d := range domainSent     { domSet[d] = struct{}{} }
-	for d := range domainDeferred { domSet[d] = struct{}{} }
-	for d := range domainBounced  { domSet[d] = struct{}{} }
+	for d := range domainSent {
+		domSet[d] = struct{}{}
+	}
+	for d := range domainDeferred {
+		domSet[d] = struct{}{}
+	}
+	for d := range domainBounced {
+		domSet[d] = struct{}{}
+	}
 	deliveries := make([]DomainDelivery, 0, len(domSet))
 	for d := range domSet {
 		sent, deferred, bounced := domainSent[d], domainDeferred[d], domainBounced[d]
 		total := sent + deferred + bounced
-		if total < 5 { continue }
-		if deferred+bounced == 0 { continue } // exclude domains with no failures
+		if total < 5 {
+			continue
+		}
+		if deferred+bounced == 0 {
+			continue
+		} // exclude domains with no failures
 		failRate := float64(deferred+bounced) / float64(total) * 100
 		deliveries = append(deliveries, DomainDelivery{
 			Domain: d, Sent: sent, Deferred: deferred,
@@ -195,81 +286,110 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		})
 	}
 	sort.Slice(deliveries, func(i, j int) bool { return deliveries[i].FailRate > deliveries[j].FailRate })
-	if len(deliveries) > 20 { deliveries = deliveries[:20] }
+	if len(deliveries) > 20 {
+		deliveries = deliveries[:20]
+	}
 
 	return VolumeInsights{
 		Hourly:         hourly,
 		DeferReasons:   toDeferReasons(deferReasons),
 		BounceReasons:  toDeferReasons(bounceReasons),
+		DeferBuckets:   toDeferReasons(deferBuckets),
+		BounceBuckets:  toDeferReasons(bounceBuckets),
 		FailingDomains: deliveries,
 	}
 }
 
 // getDelayInsights computes delay statistics for entries with timestamp >= since.
-func (s *logStore) getDelayInsights(since int64) DelayInsights {
+func (s *logStore) computeDelayInsights(since int64) DelayInsights {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var (
-		delayCount                                     int
+		delayCount                                    int
 		delaySumB, delaySumIQ, delaySumCS, delaySumTX float64
-		maxDelay                                       float64
-		minDelay                                       = math.MaxFloat64
-		distBuckets                                    [7]int
-		delayByMin = make(map[int64][]float64)
-		bqByMin    = make(map[int64][]float64)
-		iqByMin    = make(map[int64][]float64)
-		cssByMin   = make(map[int64][]float64)
-		txByMin    = make(map[int64][]float64)
+		maxDelay                                      float64
+		minDelay                                      = math.MaxFloat64
+		distBuckets                                   [7]int
+		delayByMin                                    = make(map[int64][]float64)
+		bqByMin                                       = make(map[int64][]float64)
+		iqByMin                                       = make(map[int64][]float64)
+		cssByMin                                      = make(map[int64][]float64)
+		txByMin                                       = make(map[int64][]float64)
 	)
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Delay <= 0 || e.Delays == nil { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Delay <= 0 || e.Delays == nil {
+			continue
+		}
 
 		d := e.Delay
 		delayCount++
-		if d > maxDelay { maxDelay = d }
-		if d < minDelay { minDelay = d }
-		delaySumB  += e.Delays.BeforeQmgr
+		if d > maxDelay {
+			maxDelay = d
+		}
+		if d < minDelay {
+			minDelay = d
+		}
+		delaySumB += e.Delays.BeforeQmgr
 		delaySumIQ += e.Delays.InQmgr
 		delaySumCS += e.Delays.ConnSetup
 		delaySumTX += e.Delays.Transmission
 		switch {
-		case d < 0.1: distBuckets[0]++
-		case d < 0.5: distBuckets[1]++
-		case d < 1:   distBuckets[2]++
-		case d < 2:   distBuckets[3]++
-		case d < 5:   distBuckets[4]++
-		case d < 10:  distBuckets[5]++
-		default:      distBuckets[6]++
+		case d < 0.1:
+			distBuckets[0]++
+		case d < 0.5:
+			distBuckets[1]++
+		case d < 1:
+			distBuckets[2]++
+		case d < 2:
+			distBuckets[3]++
+		case d < 5:
+			distBuckets[4]++
+		case d < 10:
+			distBuckets[5]++
+		default:
+			distBuckets[6]++
 		}
 		min1 := e.Timestamp / 60000
 		delayByMin[min1] = append(delayByMin[min1], d)
-		bqByMin[min1]    = append(bqByMin[min1],    e.Delays.BeforeQmgr)
-		iqByMin[min1]    = append(iqByMin[min1],    e.Delays.InQmgr)
-		cssByMin[min1]   = append(cssByMin[min1],   e.Delays.ConnSetup)
-		txByMin[min1]    = append(txByMin[min1],    e.Delays.Transmission)
+		bqByMin[min1] = append(bqByMin[min1], e.Delays.BeforeQmgr)
+		iqByMin[min1] = append(iqByMin[min1], e.Delays.InQmgr)
+		cssByMin[min1] = append(cssByMin[min1], e.Delays.ConnSetup)
+		txByMin[min1] = append(txByMin[min1], e.Delays.Transmission)
 	}
 
 	n := float64(delayCount)
 	avgBefore, avgInQ, avgConn, avgTx, avgTotal := 0.0, 0.0, 0.0, 0.0, 0.0
 	if n > 0 {
-		avgBefore = delaySumB / n;  avgInQ = delaySumIQ / n
-		avgConn   = delaySumCS / n; avgTx  = delaySumTX / n
-		avgTotal  = (delaySumB + delaySumIQ + delaySumCS + delaySumTX) / n
+		avgBefore = delaySumB / n
+		avgInQ = delaySumIQ / n
+		avgConn = delaySumCS / n
+		avgTx = delaySumTX / n
+		avgTotal = (delaySumB + delaySumIQ + delaySumCS + delaySumTX) / n
 	}
-	if minDelay == math.MaxFloat64 { minDelay = 0 }
+	if minDelay == math.MaxFloat64 {
+		minDelay = 0
+	}
 
 	labels := []string{"<0.1s", "0.1-0.5s", "0.5-1s", "1-2s", "2-5s", "5-10s", "≥10s"}
 	dist := make([]DelayDistribution, 7)
 	distTotal := 0
-	for _, c := range distBuckets { distTotal += c }
+	for _, c := range distBuckets {
+		distTotal += c
+	}
 	for i, c := range distBuckets {
 		pct := 0.0
-		if distTotal > 0 { pct = float64(c) / float64(distTotal) * 100 }
+		if distTotal > 0 {
+			pct = float64(c) / float64(distTotal) * 100
+		}
 		dist[i] = DelayDistribution{Range: labels[i], Count: c, Percentage: pct}
 	}
 
@@ -277,11 +397,17 @@ func (s *logStore) getDelayInsights(since int64) DelayInsights {
 		mn, mx := math.MaxFloat64, 0.0
 		for _, vs := range m {
 			for _, v := range vs {
-				if v < mn { mn = v }
-				if v > mx { mx = v }
+				if v < mn {
+					mn = v
+				}
+				if v > mx {
+					mx = v
+				}
 			}
 		}
-		if mn == math.MaxFloat64 { mn = 0 }
+		if mn == math.MaxFloat64 {
+			mn = 0
+		}
 		return mn, mx
 	}
 	minBQ, maxBQ := minMaxSlice(bqByMin)
@@ -306,8 +432,10 @@ func (s *logStore) getDelayInsights(since int64) DelayInsights {
 	}
 }
 
-// getMessages returns grouped delivery rows (one per queue ID + recipient).
-func (s *logStore) getMessages(since int64, page, limit int, search, statusFilter, sortBy, sortOrder string) PaginatedMessages {
+// computeMessageRows builds the full filtered+sorted row set for the Activity table.
+// Pagination is applied in getMessages on top of the cached rows, so page flips
+// never rescan the store.
+func (s *logStore) computeMessageRows(since int64, search, statusFilter, sortBy, sortOrder string) []MessageRow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -324,10 +452,17 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 	// the "active" line is outside the requested time window.
 	for i := range s.logs {
 		e := &s.logs[i]
-		if e.QueueID == "" { continue }
+		if e.QueueID == "" {
+			continue
+		}
 		m := qmap[e.QueueID]
-		if m == nil { m = &qmeta{}; qmap[e.QueueID] = m }
-		if e.From != "" && m.from == "" { m.from = e.From }
+		if m == nil {
+			m = &qmeta{}
+			qmap[e.QueueID] = m
+		}
+		if e.From != "" && m.from == "" {
+			m.from = e.From
+		}
 		if e.Status == "active" && (m.firstSeen == 0 || e.Timestamp < m.firstSeen) {
 			m.firstSeen = e.Timestamp
 		}
@@ -338,15 +473,27 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 	searchLow := strings.ToLower(search)
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if e.QueueID == "" || e.To == "" { continue }
-		if e.Status == "" || e.Status == "active" || e.Status == "removed" { continue }
-		if s.isNDR(e) { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if e.QueueID == "" || e.To == "" {
+			continue
+		}
+		if e.Status == "" || e.Status == "active" || e.Status == "removed" {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
 
 		m := qmap[e.QueueID]
 		from := ""
-		if m != nil { from = m.from }
-		if from == "<>" { continue }
+		if m != nil {
+			from = m.from
+		}
+		if from == "<>" {
+			continue
+		}
 
 		processTime := 0.0
 		if m != nil && m.firstSeen > 0 && e.Timestamp > m.firstSeen {
@@ -359,11 +506,16 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 			QueueID: e.QueueID, Time: e.Timestamp,
 			From: from, To: e.To,
 			Status: e.Status, Delay: e.Delay, ProcessTime: processTime,
+			DSN: e.DSN, SMTPMsg: e.SMTPMsg,
 		}
 
-		if statusFilter != "" && row.Status != statusFilter { continue }
+		if statusFilter != "" && row.Status != statusFilter {
+			continue
+		}
 		if searchLow != "" {
-			if !strings.Contains(strings.ToLower(row.QueueID+" "+row.From+" "+row.To), searchLow) { continue }
+			if !strings.Contains(strings.ToLower(row.QueueID+" "+row.From+" "+row.To), searchLow) {
+				continue
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -385,27 +537,65 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 			a, b := rows[i], rows[j]
 			var less bool
 			switch sortBy {
-			case "queueId":     less = a.QueueID < b.QueueID
-			case "status":      less = a.Status < b.Status
-			case "from":        less = a.From < b.From
-			case "to":          less = a.To < b.To
-			case "delay":       less = a.Delay < b.Delay
-			case "processTime": less = a.ProcessTime < b.ProcessTime
-			default:            less = a.Time < b.Time
+			case "queueId":
+				less = a.QueueID < b.QueueID
+			case "status":
+				less = a.Status < b.Status
+			case "from":
+				less = a.From < b.From
+			case "to":
+				less = a.To < b.To
+			case "delay":
+				less = a.Delay < b.Delay
+			case "processTime":
+				less = a.ProcessTime < b.ProcessTime
+			default:
+				less = a.Time < b.Time
 			}
-			if sortOrder == "asc" { return less }
+			if sortOrder == "asc" {
+				return less
+			}
 			return !less
 		})
 	}
 
+	return rows
+}
+
+// getMessageRows caches computeMessageRows — key excludes page/limit on purpose.
+// shortcut: row-sets >50k rows aren't cached, to bound memory on huge logs; page
+// flips on those recompute (~2ms at 600k entries) instead.
+func (s *logStore) getMessageRows(since int64, search, statusFilter, sortBy, sortOrder string) []MessageRow {
+	if v, ok := queryCacheGet[[]MessageRow](s, "getMessageRows", []any{since, search, statusFilter, sortBy, sortOrder}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeMessageRows(since, search, statusFilter, sortBy, sortOrder)
+	if len(res) <= 50_000 {
+		queryCacheStore(s, gen, "getMessageRows", []any{since, search, statusFilter, sortBy, sortOrder}, res)
+	}
+	return res
+}
+
+func (s *logStore) getMessages(since int64, page, limit int, search, statusFilter, sortBy, sortOrder string) PaginatedMessages {
+	rows := s.getMessageRows(since, search, statusFilter, sortBy, sortOrder)
+
 	total := len(rows)
 	totalPages := (total + limit - 1) / limit
-	if totalPages < 1 { totalPages = 1 }
-	if page < 1 { page = 1 }
-	if page > totalPages { page = totalPages }
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
 	start := (page - 1) * limit
 	end := start + limit
-	if end > total { end = total }
+	if end > total {
+		end = total
+	}
 
 	return PaginatedMessages{
 		Rows: rows[start:end],
@@ -416,82 +606,29 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 	}
 }
 
-// getPaginated returns all log entries with optional filtering and sorting.
-func (s *logStore) getPaginated(since int64, page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	searchLower := strings.ToLower(search)
-	filtered := make([]ParsedLogEntry, 0, len(s.logs))
-	for _, e := range s.logs {
-		if since > 0 && e.Timestamp < since { continue }
-		if status != "" && e.Status != status { continue }
-		if searchLower != "" {
-			if !strings.Contains(strings.ToLower(e.QueueID), searchLower) &&
-				!strings.Contains(strings.ToLower(e.From), searchLower) &&
-				!strings.Contains(strings.ToLower(e.To), searchLower) &&
-				!strings.Contains(strings.ToLower(e.Status), searchLower) {
-				continue
-			}
-		}
-		filtered = append(filtered, e)
-	}
-
-	// Logs are ingested in file order (chronological), so timestamp sort is free.
-	// Only sort when a non-timestamp column or reverse order is explicitly requested.
-	needsSort := sortBy != "" && sortBy != "timestamp"
-	if !needsSort && sortOrder == "desc" {
-		// Reverse in place — cheaper than sort.SliceStable for large slices.
-		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
-			filtered[i], filtered[j] = filtered[j], filtered[i]
-		}
-	} else if needsSort {
-		sort.SliceStable(filtered, func(i, j int) bool {
-			var less bool
-			switch sortBy {
-			case "status": less = filtered[i].Status < filtered[j].Status
-			case "from":   less = filtered[i].From < filtered[j].From
-			case "to":     less = filtered[i].To < filtered[j].To
-			case "delay":  less = filtered[i].Delay < filtered[j].Delay
-			default:       less = filtered[i].Timestamp < filtered[j].Timestamp
-			}
-			if sortOrder == "desc" { return !less }
-			return less
-		})
-	}
-
-	total := len(filtered)
-	totalPages := (total + limit - 1) / limit
-	if totalPages == 0 { totalPages = 1 }
-	if page < 1 { page = 1 }
-	if page > totalPages { page = totalPages }
-	start := (page - 1) * limit
-	end := start + limit
-	if end > total { end = total }
-
-	return PaginatedLogs{
-		Logs: filtered[start:end],
-		Pagination: PaginationInfo{
-			Page: page, Limit: limit, Total: total, TotalPages: totalPages,
-			HasNext: page < totalPages, HasPrev: page > 1,
-		},
-	}
-}
-
-// getErrorsPaginated returns error/warning entries with optional type filter.
-func (s *logStore) getErrorsPaginated(since int64, page, limit int, errType, sortOrder string) PaginatedLogs {
+// computeErrorRows builds the full filtered error/warning entry list.
+// Pagination is applied in getErrorsPaginated on top of the cached rows.
+func (s *logStore) computeErrorRows(since int64, errType, sortOrder string) []ParsedLogEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	filtered := make([]ParsedLogEntry, 0)
 	for _, e := range s.logs {
-		if since > 0 && e.Timestamp < since { continue }
-		if !e.IsError && !e.IsWarning { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if !e.IsError && !e.IsWarning {
+			continue
+		}
 		switch errType {
 		case "errors":
-			if !e.IsError { continue }
+			if !e.IsError {
+				continue
+			}
 		case "warnings":
-			if !e.IsWarning { continue }
+			if !e.IsWarning {
+				continue
+			}
 		}
 		filtered = append(filtered, e)
 	}
@@ -503,18 +640,45 @@ func (s *logStore) getErrorsPaginated(since int64, page, limit int, errType, sor
 			filtered[i], filtered[j] = filtered[j], filtered[i]
 		}
 	}
+	return filtered
+}
 
-	total := len(filtered)
+// getErrorRows caches computeErrorRows — key excludes page/limit on purpose.
+// shortcut: row-sets >50k rows aren't cached, to bound memory on huge logs.
+func (s *logStore) getErrorRows(since int64, errType, sortOrder string) []ParsedLogEntry {
+	if v, ok := queryCacheGet[[]ParsedLogEntry](s, "getErrorRows", []any{since, errType, sortOrder}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeErrorRows(since, errType, sortOrder)
+	if len(res) <= 50_000 {
+		queryCacheStore(s, gen, "getErrorRows", []any{since, errType, sortOrder}, res)
+	}
+	return res
+}
+
+func (s *logStore) getErrorsPaginated(since int64, page, limit int, errType, sortOrder string) PaginatedLogs {
+	rows := s.getErrorRows(since, errType, sortOrder)
+
+	total := len(rows)
 	totalPages := (total + limit - 1) / limit
-	if totalPages == 0 { totalPages = 1 }
-	if page < 1 { page = 1 }
-	if page > totalPages { page = totalPages }
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
 	start := (page - 1) * limit
 	end := start + limit
-	if end > total { end = total }
+	if end > total {
+		end = total
+	}
 
 	return PaginatedLogs{
-		Logs: filtered[start:end],
+		Logs: rows[start:end],
 		Pagination: PaginationInfo{
 			Page: page, Limit: limit, Total: total, TotalPages: totalPages,
 			HasNext: page < totalPages, HasPrev: page > 1,
@@ -524,7 +688,7 @@ func (s *logStore) getErrorsPaginated(since int64, page, limit int, errType, sor
 
 // getRecipientDrilldown returns per-address delivery stats for a given domain.
 // since=0 means all time.
-func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDrilldown {
+func (s *logStore) computeRecipientDrilldown(domain string, since int64) RecipientDrilldown {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -538,11 +702,21 @@ func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDr
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.To == "" { continue }
-		if e.Status == "" || e.Status == "active" || e.Status == "removed" { continue }
-		if extractDomain(e.To) != domain { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.To == "" {
+			continue
+		}
+		if e.Status == "" || e.Status == "active" || e.Status == "removed" {
+			continue
+		}
+		if extractDomain(e.To) != domain {
+			continue
+		}
 
 		st, ok := stats[e.To]
 		if !ok {
@@ -550,18 +724,21 @@ func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDr
 			stats[e.To] = st
 		}
 		switch e.Status {
-		case "sent":     st.sent++
-		case "deferred": st.deferred++
-		case "bounced":  st.bounced++
+		case "sent":
+			st.sent++
+		case "deferred":
+			st.deferred++
+		case "bounced":
+			st.bounced++
 		}
 		if e.Timestamp > st.lastSeen {
-			st.lastSeen   = e.Timestamp
+			st.lastSeen = e.Timestamp
 			st.lastStatus = e.Status
 			switch e.Status {
 			case "deferred":
-				st.lastReason = extractDeferReason(e.RawLog)
+				st.lastReason = e.DeferReason
 			case "bounced":
-				st.lastReason = extractBounceReason(e.RawLog)
+				st.lastReason = e.BounceReason
 			default:
 				st.lastReason = ""
 			}
@@ -573,7 +750,9 @@ func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDr
 	for addr, st := range stats {
 		total := st.sent + st.deferred + st.bounced
 		failRate := 0.0
-		if total > 0 { failRate = float64(st.deferred+st.bounced) / float64(total) * 100 }
+		if total > 0 {
+			failRate = float64(st.deferred+st.bounced) / float64(total) * 100
+		}
 		recipients = append(recipients, RecipientStat{
 			Address:    addr,
 			Domain:     domain,
@@ -586,21 +765,25 @@ func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDr
 			LastStatus: st.lastStatus,
 			LastReason: st.lastReason,
 		})
-		domSent     += st.sent
+		domSent += st.sent
 		domDeferred += st.deferred
-		domBounced  += st.bounced
+		domBounced += st.bounced
 	}
 
 	sort.Slice(recipients, func(i, j int) bool {
 		fi := recipients[i].Deferred + recipients[i].Bounced
 		fj := recipients[j].Deferred + recipients[j].Bounced
-		if fi != fj { return fi > fj }
+		if fi != fj {
+			return fi > fj
+		}
 		return recipients[i].Total > recipients[j].Total
 	})
 
 	domTotal := domSent + domDeferred + domBounced
 	domFailRate := 0.0
-	if domTotal > 0 { domFailRate = float64(domDeferred+domBounced) / float64(domTotal) * 100 }
+	if domTotal > 0 {
+		domFailRate = float64(domDeferred+domBounced) / float64(domTotal) * 100
+	}
 
 	return RecipientDrilldown{
 		Domain:     domain,
@@ -615,7 +798,7 @@ func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDr
 
 // getQueueAgeDistribution builds a histogram of delivery delays (queue age)
 // for all smtp delivery lines with timestamp >= since.
-func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
+func (s *logStore) computeQueueAgeDistribution(since int64) QueueAgeDistribution {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -625,15 +808,15 @@ func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
 		min, max float64 // seconds; max=-1 means unbounded
 	}
 	defs := []bucket{
-		{"< 10s",   0,       10},
-		{"10–30s",  10,      30},
-		{"30s–2m",  30,      120},
-		{"2–10m",   120,     600},
-		{"10–30m",  600,     1800},
-		{"30m–1h",  1800,    3600},
-		{"1–6h",    3600,    21600},
-		{"6–24h",   21600,   86400},
-		{"> 24h",   86400,   -1},
+		{"< 10s", 0, 10},
+		{"10–30s", 10, 30},
+		{"30s–2m", 30, 120},
+		{"2–10m", 120, 600},
+		{"10–30m", 600, 1800},
+		{"30m–1h", 1800, 3600},
+		{"1–6h", 3600, 21600},
+		{"6–24h", 21600, 86400},
+		{"> 24h", 86400, -1},
 	}
 	counts := make([]int, len(defs))
 	var delays []float64
@@ -641,15 +824,25 @@ func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
 		// Only smtp lines with a final status and a delay value
-		if e.Delay <= 0 { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		if e.Delay <= 0 {
+			continue
+		}
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" {
+			continue
+		}
 
 		d := e.Delay
 		delays = append(delays, d)
-		if d > maxD { maxD = d }
+		if d > maxD {
+			maxD = d
+		}
 		for j, b := range defs {
 			if d >= b.min && (b.max < 0 || d < b.max) {
 				counts[j]++
@@ -662,7 +855,9 @@ func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
 	buckets := make([]QueueAgeBucket, len(defs))
 	for i, b := range defs {
 		pct := 0.0
-		if total > 0 { pct = float64(counts[i]) / float64(total) * 100 }
+		if total > 0 {
+			pct = float64(counts[i]) / float64(total) * 100
+		}
 		buckets[i] = QueueAgeBucket{Label: b.label, Min: b.min, Max: b.max, Count: counts[i], Percent: pct}
 	}
 
@@ -673,7 +868,7 @@ func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
 		copy(sorted, delays)
 		sort.Float64s(sorted)
 		median = sorted[total/2]
-		p95    = sorted[int(float64(total)*0.95)]
+		p95 = sorted[int(float64(total)*0.95)]
 	}
 
 	return QueueAgeDistribution{
@@ -686,7 +881,7 @@ func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
 }
 
 // getRelayInsights returns per-relay delivery stats categorized as throttling/blocking/healthy.
-func (s *logStore) getRelayInsights(since int64) RelayInsights {
+func (s *logStore) computeRelayInsights(since int64) RelayInsights {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -700,10 +895,18 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Relay == "" || e.Relay == "none" { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Relay == "" || e.Relay == "none" {
+			continue
+		}
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" {
+			continue
+		}
 
 		st, ok := stats[e.Relay]
 		if !ok {
@@ -711,35 +914,42 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 			stats[e.Relay] = st
 		}
 		switch e.Status {
-		case "sent":     st.sent++
-		case "deferred": st.deferred++
-		case "bounced":  st.bounced++
+		case "sent":
+			st.sent++
+		case "deferred":
+			st.deferred++
+		case "bounced":
+			st.bounced++
 		}
 		if e.DSN != "" {
 			st.dsnCounts[e.DSN]++
 		}
 		// track most recent non-empty SMTP message
 		if e.SMTPMsg != "" && e.Timestamp > st.lastMsgTs {
-			st.lastMsg   = e.SMTPMsg
+			st.lastMsg = e.SMTPMsg
 			st.lastMsgTs = e.Timestamp
 		}
 	}
 
-	// blocking DSN prefixes — 5.7.x policy, 5.4.1 access denied, 5.x.x permanent
+	// Any 5.x.x permanent failure counts as a block (5.7 policy, 5.4.1 access denied, …).
 	isBlockDSN := func(dsn string) bool {
-		return strings.HasPrefix(dsn, "5.7") || dsn == "5.4.1" || strings.HasPrefix(dsn, "5.")
+		return strings.HasPrefix(dsn, "5.")
 	}
 
 	var throttling, blocking, healthy []RelayStat
 	for relay, st := range stats {
 		total := st.sent + st.deferred + st.bounced
-		if total == 0 { continue }
+		if total == 0 {
+			continue
+		}
 		failRate := float64(st.deferred+st.bounced) / float64(total) * 100
 
 		// top DSN
 		topDSN, topCount := "", 0
 		for dsn, c := range st.dsnCounts {
-			if c > topCount { topDSN, topCount = dsn, c }
+			if c > topCount {
+				topDSN, topCount = dsn, c
+			}
 		}
 
 		rs := RelayStat{
@@ -769,9 +979,15 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 	sortRelays(blocking)
 	sortRelays(healthy)
 
-	if throttling == nil { throttling = []RelayStat{} }
-	if blocking   == nil { blocking   = []RelayStat{} }
-	if healthy    == nil { healthy    = []RelayStat{} }
+	if throttling == nil {
+		throttling = []RelayStat{}
+	}
+	if blocking == nil {
+		blocking = []RelayStat{}
+	}
+	if healthy == nil {
+		healthy = []RelayStat{}
+	}
 
 	return RelayInsights{Throttling: throttling, Blocking: blocking, Healthy: healthy}
 }
@@ -780,40 +996,277 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 type RelayMessage struct {
 	Timestamp int64  `json:"timestamp"`
 	To        string `json:"to"`
+	From      string `json:"from"`
+	QueueID   string `json:"queueId"`
 	Status    string `json:"status"`
 	DSN       string `json:"dsn"`
 	Message   string `json:"message"`
 }
 
-// getRelayMessages returns all delivery attempts for a given relay+status.
-// status="" means all statuses.
-func (s *logStore) getRelayMessages(relay, status string, since int64) []RelayMessage {
+// ── Garbage detection ─────────────────────────────────────────────────────────
+
+// GarbageRow is one flagged recipient with who sent to it and the delivery details.
+type GarbageRow struct {
+	To          string   `json:"to"`
+	Flags       []string `json:"flags"`
+	Senders     []string `json:"senders"`
+	Sent        int      `json:"sent"`
+	Deferred    int      `json:"deferred"`
+	Bounced     int      `json:"bounced"`
+	Relays      []string `json:"relays"`
+	LastSeen    int64    `json:"lastSeen"`
+	LastDSN     string   `json:"lastDsn"`
+	LastMessage string   `json:"lastMessage"`
+}
+
+// reservedTLDs — addresses on these can never reach a real mailbox (incident:
+// openpages.local / dps-poc uat fixtures).
+var reservedTLDs = []string{".local", ".internal", ".test", ".invalid", ".localhost", ".example", ".lan", ".corp", ".home", ".arpa"}
+
+// addrFlags returns why an address looks like garbage: reserved TLD,
+// random-looking localpart (QA fixture usernames), or — for bounce evidence —
+// user-unknown is flagged by the caller since it needs the DSN/message.
+func addrFlags(addr string) []string {
+	at := strings.LastIndex(addr, "@")
+	if at < 0 {
+		return nil
+	}
+	local, domain := addr[:at], strings.ToLower(addr[at+1:])
+	var flags []string
+	for _, t := range reservedTLDs {
+		if strings.HasSuffix(domain, t) {
+			flags = append(flags, "reserved-tld")
+			break
+		}
+	}
+	if looksRandom(local) {
+		flags = append(flags, "random-localpart")
+	}
+	return flags
+}
+
+// looksRandom heuristically flags fixture-style usernames: long, vowel-poor,
+// digit-heavy localparts like "xk7fj29dqmz". Triage signal, not proof.
+func looksRandom(s string) bool {
+	if len(s) < 10 {
+		return false
+	}
+	letters, vowels, digits, run, maxRun := 0, 0, 0, 0, 0
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case strings.ContainsRune("aeiouy", r):
+			vowels++
+			letters++
+			run = 0
+		case r >= '0' && r <= '9':
+			digits++
+			run = 0
+		case r >= 'a' && r <= 'z':
+			letters++
+			run++
+			if run > maxRun {
+				maxRun = run
+			}
+		default:
+			run = 0
+		}
+	}
+	return maxRun >= 6 || (digits >= 2 && vowels*4 < letters) || digits >= len(s)/2
+}
+
+// getGarbage returns delivery traffic to/from addresses flagged as garbage,
+// grouped per recipient, heaviest first.
+func (s *logStore) computeGarbage(since int64) []GarbageRow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var out []RelayMessage
+	type acc struct {
+		row     GarbageRow
+		senders map[string]struct{}
+		relays  map[string]struct{}
+		lastTs  int64
+	}
+	accs := make(map[string]*acc)
+
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Relay != relay { continue }
-		if status != "" && e.Status != status { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
-		out = append(out, RelayMessage{
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" {
+			continue
+		}
+		if e.To == "" || e.To == "(undisclosed-recipients:)" {
+			continue
+		}
+
+		flags := addrFlags(e.To)
+		msgLow := strings.ToLower(e.SMTPMsg)
+		if e.Status == "bounced" && (e.DSN == "5.1.1" || strings.Contains(msgLow, "user unknown")) {
+			flags = append(flags, "user-unknown")
+		}
+		if len(flags) == 0 {
+			continue
+		}
+		// delivery lines never carry from= — join it from the qmgr/pickup line via queue ID
+		from := e.From
+		if (from == "" || from == "<>") && e.QueueID != "" {
+			from = s.queueFrom[e.QueueID]
+		}
+
+		a := accs[e.To]
+		if a == nil {
+			a = &acc{row: GarbageRow{To: e.To, Flags: flags}, senders: map[string]struct{}{}, relays: map[string]struct{}{}}
+			accs[e.To] = a
+		}
+		// merge flags from every hit (first hit may miss user-unknown evidence)
+		for _, f := range flags {
+			known := false
+			for _, hf := range a.row.Flags {
+				if hf == f {
+					known = true
+					break
+				}
+			}
+			if !known {
+				a.row.Flags = append(a.row.Flags, f)
+			}
+		}
+		if from != "" && from != "<>" {
+			if sf := addrFlags(from); len(sf) > 0 {
+				known := false
+				for _, hf := range a.row.Flags {
+					if hf == "garbage-sender" {
+						known = true
+						break
+					}
+				}
+				if !known {
+					a.row.Flags = append(a.row.Flags, "garbage-sender")
+				}
+			}
+		}
+		if from != "" {
+			a.senders[from] = struct{}{}
+		}
+		if e.Relay != "" && e.Relay != "none" {
+			a.relays[e.Relay] = struct{}{}
+		}
+		switch e.Status {
+		case "sent":
+			a.row.Sent++
+		case "deferred":
+			a.row.Deferred++
+		case "bounced":
+			a.row.Bounced++
+		}
+		if e.Timestamp > a.lastTs {
+			a.lastTs = e.Timestamp
+			a.row.LastSeen = e.Timestamp
+			a.row.LastDSN = e.DSN
+			a.row.LastMessage = e.SMTPMsg
+		}
+	}
+
+	out := make([]GarbageRow, 0, len(accs))
+	for _, a := range accs {
+		a.row.Senders = make([]string, 0, len(a.senders))
+		for snd := range a.senders {
+			a.row.Senders = append(a.row.Senders, snd)
+		}
+		a.row.Relays = make([]string, 0, len(a.relays))
+		for r := range a.relays {
+			a.row.Relays = append(a.row.Relays, r)
+		}
+		sort.Strings(a.row.Senders)
+		out = append(out, a.row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti := out[i].Sent + out[i].Deferred + out[i].Bounced
+		tj := out[j].Sent + out[j].Deferred + out[j].Bounced
+		if ti != tj {
+			return ti > tj
+		}
+		return out[i].To < out[j].To
+	})
+	return out
+}
+
+// isDeliveryStatus — the drilldown queries only count real delivery attempts.
+func isDeliveryStatus(st string) bool {
+	return st == "sent" || st == "deferred" || st == "bounced"
+}
+
+// matchMessages returns ReasonMessage rows for entries matching pred, newest first.
+// Shared scan for the relay/reason/sender/bucket drilldowns.
+func (s *logStore) matchMessages(since int64, pred func(e *ParsedLogEntry) bool) []ReasonMessage {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []ReasonMessage
+	for i := range s.logs {
+		e := &s.logs[i]
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if !pred(e) {
+			continue
+		}
+		// delivery lines never carry from= — join it from the qmgr/pickup line via queue ID
+		from := e.From
+		if (from == "" || from == "<>") && e.QueueID != "" {
+			from = s.queueFrom[e.QueueID]
+		}
+		var reason string
+		switch e.Status {
+		case "deferred":
+			reason = e.DeferReason
+		case "bounced":
+			reason = e.BounceReason
+		}
+		out = append(out, ReasonMessage{
 			Timestamp: e.Timestamp,
+			QueueID:   e.QueueID,
+			From:      from,
 			To:        e.To,
 			Status:    e.Status,
 			DSN:       e.DSN,
+			Reason:    reason,
 			Message:   e.SMTPMsg,
 		})
 	}
-	// sort newest first
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
 	return out
 }
 
+func (s *logStore) computeRelayMessages(relay, status string, since int64) []RelayMessage {
+	rows := s.matchMessages(since, func(e *ParsedLogEntry) bool {
+		return e.Relay == relay && isDeliveryStatus(e.Status) &&
+			(status == "" || e.Status == status)
+	})
+	out := make([]RelayMessage, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RelayMessage{
+			Timestamp: r.Timestamp,
+			To:        r.To,
+			From:      r.From,
+			QueueID:   r.QueueID,
+			Status:    r.Status,
+			DSN:       r.DSN,
+			Message:   r.Message,
+		})
+	}
+	return out
+}
+
 // getSenderStats returns per-sender delivery stats, sorted by total volume.
-func (s *logStore) getSenderStats(since int64) []SenderStat {
+func (s *logStore) computeSenderStats(since int64) []SenderStat {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -822,23 +1275,37 @@ func (s *logStore) getSenderStats(since int64) []SenderStat {
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" {
+			continue
+		}
 
 		// Resolve sender: use e.From if present, else look up via queueID
 		addr := e.From
 		if (addr == "" || addr == "<>") && e.QueueID != "" {
 			addr = s.queueFrom[e.QueueID]
 		}
-		if addr == "" || addr == "<>" { continue }
+		if addr == "" || addr == "<>" {
+			continue
+		}
 
 		st, ok := stats[addr]
-		if !ok { st = &stat{}; stats[addr] = st }
+		if !ok {
+			st = &stat{}
+			stats[addr] = st
+		}
 		switch e.Status {
-		case "sent":     st.sent++
-		case "deferred": st.deferred++
-		case "bounced":  st.bounced++
+		case "sent":
+			st.sent++
+		case "deferred":
+			st.deferred++
+		case "bounced":
+			st.bounced++
 		}
 	}
 
@@ -846,7 +1313,9 @@ func (s *logStore) getSenderStats(since int64) []SenderStat {
 	for addr, st := range stats {
 		total := st.sent + st.deferred + st.bounced
 		failRate := 0.0
-		if total > 0 { failRate = float64(st.deferred+st.bounced) / float64(total) * 100 }
+		if total > 0 {
+			failRate = float64(st.deferred+st.bounced) / float64(total) * 100
+		}
 		out = append(out, SenderStat{Address: addr, Sent: st.sent, Deferred: st.deferred, Bounced: st.bounced, Total: total, FailRate: failRate})
 	}
 
@@ -877,83 +1346,37 @@ type ReasonMessage struct {
 
 // getMessagesByReason returns all delivery attempts whose extracted reason matches.
 // status = "deferred" | "bounced"
-func (s *logStore) getMessagesByReason(reason, status string, since int64) []ReasonMessage {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var out []ReasonMessage
-	for i := range s.logs {
-		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Status != status { continue }
-
-		var extracted string
-		switch status {
-		case "deferred":
-			extracted = extractDeferReason(e.RawLog)
-		case "bounced":
-			extracted = extractBounceReason(e.RawLog)
+func (s *logStore) computeMessagesByReason(reason, status string, since int64) []ReasonMessage {
+	return s.matchMessages(since, func(e *ParsedLogEntry) bool {
+		if e.Status != status {
+			return false
 		}
-		if extracted != reason { continue }
-
-		out = append(out, ReasonMessage{
-			Timestamp: e.Timestamp,
-			QueueID:   e.QueueID,
-			From:      e.From,
-			To:        e.To,
-			Status:    e.Status,
-			DSN:       e.DSN,
-			Reason:    extracted,
-			Message:   e.SMTPMsg,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
-	return out
+		if e.Status == "deferred" {
+			return e.DeferReason == reason
+		}
+		return e.BounceReason == reason
+	})
 }
 
 // getMessagesBySender returns all delivery attempts from a given sender address.
 // status = "deferred" | "bounced" | "" (all)
-func (s *logStore) getMessagesBySender(from, status string, since int64) []ReasonMessage {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var out []ReasonMessage
-	for i := range s.logs {
-		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
-
-		// Resolve sender via queueFrom if e.From is empty
+func (s *logStore) computeMessagesBySender(from, status string, since int64) []ReasonMessage {
+	return s.matchMessages(since, func(e *ParsedLogEntry) bool {
+		if !isDeliveryStatus(e.Status) {
+			return false
+		}
 		addr := e.From
 		if (addr == "" || addr == "<>") && e.QueueID != "" {
 			addr = s.queueFrom[e.QueueID]
 		}
-		if addr != from { continue }
-		if status == "failed" {
-			if e.Status != "deferred" && e.Status != "bounced" { continue }
-		} else if status != "" && e.Status != status { continue }
-
-		var reason string
-		switch e.Status {
-		case "deferred": reason = extractDeferReason(e.RawLog)
-		case "bounced":  reason = extractBounceReason(e.RawLog)
+		if addr != from {
+			return false
 		}
-
-		out = append(out, ReasonMessage{
-			Timestamp: e.Timestamp,
-			QueueID:   e.QueueID,
-			From:      addr,
-			To:        e.To,
-			Status:    e.Status,
-			DSN:       e.DSN,
-			Reason:    reason,
-			Message:   e.SMTPMsg,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
-	return out
+		if status == "failed" {
+			return e.Status == "deferred" || e.Status == "bounced"
+		}
+		return status == "" || e.Status == status
+	})
 }
 
 // ── IP Reputation ──────────────────────────────────────────────────────────
@@ -1068,7 +1491,7 @@ func extractBlockEvent(rawLog string) (ourIP, service string, ok bool) {
 	return "", "", false
 }
 
-func (s *logStore) getIPReputationReport(since int64) IPReputationReport {
+func (s *logStore) computeIPReputationReport(since int64) IPReputationReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1081,11 +1504,17 @@ func (s *logStore) getIPReputationReport(since int64) IPReputationReport {
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if e.Status != "bounced" && e.Status != "deferred" { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if e.Status != "bounced" && e.Status != "deferred" {
+			continue
+		}
 
 		ourIP, service, ok := extractBlockEvent(e.RawLog)
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		domain := ""
 		if at := strings.LastIndex(e.To, "@"); at >= 0 {
@@ -1120,19 +1549,27 @@ func (s *logStore) getIPReputationReport(since int64) IPReputationReport {
 	return IPReputationReport{Stats: out, SinceMs: since}
 }
 
-func (s *logStore) getBlockEvents(ourIP, service string, since int64) []BlockEvent {
+func (s *logStore) computeBlockEvents(ourIP, service string, since int64) []BlockEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var out []BlockEvent
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if e.Status != "bounced" && e.Status != "deferred" { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if e.Status != "bounced" && e.Status != "deferred" {
+			continue
+		}
 
 		ip, svc, ok := extractBlockEvent(e.RawLog)
-		if !ok { continue }
-		if ip != ourIP || svc != service { continue }
+		if !ok {
+			continue
+		}
+		if ip != ourIP || svc != service {
+			continue
+		}
 
 		domain := ""
 		if at := strings.LastIndex(e.To, "@"); at >= 0 {
@@ -1154,30 +1591,48 @@ func (s *logStore) getBlockEvents(ourIP, service string, since int64) []BlockEve
 
 // ── Heatmap ────────────────────────────────────────────────────────────────
 
-func (s *logStore) getHeatmap(since int64) []HeatmapCell {
+func (s *logStore) computeHeatmap(since int64) []HeatmapCell {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	type key struct{ dateEpoch int64; hour int }
-	type cell struct{ date string; sent, defer_, bounce int }
+	type key struct {
+		dateEpoch int64
+		hour      int
+	}
+	type cell struct {
+		date                 string
+		sent, defer_, bounce int
+	}
 	grid := make(map[key]*cell)
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" {
+			continue
+		}
 
 		t := time.UnixMilli(e.Timestamp).Local()
 		// midnight of the local date as epoch ms — unambiguous sort key
 		midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 		k := key{dateEpoch: midnight.UnixMilli(), hour: t.Hour()}
 		c := grid[k]
-		if c == nil { c = &cell{date: t.Format("Jan 02")}; grid[k] = c }
+		if c == nil {
+			c = &cell{date: t.Format("Jan 02")}
+			grid[k] = c
+		}
 		switch e.Status {
-		case "sent":     c.sent++
-		case "deferred": c.defer_++
-		case "bounced":  c.bounce++
+		case "sent":
+			c.sent++
+		case "deferred":
+			c.defer_++
+		case "bounced":
+			c.bounce++
 		}
 	}
 
@@ -1195,88 +1650,177 @@ func (s *logStore) getHeatmap(since int64) []HeatmapCell {
 	}
 	// Sort by epoch ms then hour — correct across month and year boundaries.
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].DateEpoch != out[j].DateEpoch { return out[i].DateEpoch < out[j].DateEpoch }
+		if out[i].DateEpoch != out[j].DateEpoch {
+			return out[i].DateEpoch < out[j].DateEpoch
+		}
 		return out[i].Hour < out[j].Hour
 	})
 	return out
 }
 
-// ── Retry Timeline ─────────────────────────────────────────────────────────
+// ── Message Journey ────────────────────────────────────────────────────────
 
-func (s *logStore) getRetryTimeline(queueID string) RetryTimeline {
+const (
+	journeyMaxQueues = 25 // newest queues kept when a recipient matches many
+	journeyMaxEvents = 300 // per-queue event cap (a queue can retry 100+ times)
+)
+
+// queueIDOnlyPattern matches a bare Postfix queue ID (uppercase hex, 10+ chars).
+// A 10+ char pure-hex recipient local part is treated as a queue ID — acceptable
+// ambiguity, real addresses carry a domain.
+var queueIDOnlyPattern = regexp.MustCompile(`^[A-F0-9]{10,}$`)
+
+// computeJourney resolves a search query — a queue ID, or a recipient/sender
+// substring — and returns every event for every matching queue, chronologically.
+func (s *logStore) computeJourney(query string) JourneyResult {
+	res := JourneyResult{Query: strings.TrimSpace(query)}
+	if res.Query == "" {
+		return res
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var attempts []RetryAttempt
-	from, to := "", ""
-	finalStatus := ""
+	q := res.Query
+	isQueueID := false
+	if u := strings.ToUpper(q); queueIDOnlyPattern.MatchString(u) {
+		isQueueID = true
+		q = u
+	} else {
+		q = strings.ToLower(q)
+	}
 
+	byQueue := make(map[string]*JourneyQueue)
+	var order []string
+	truncated := false
 	for i := range s.logs {
 		e := &s.logs[i]
-		if e.QueueID != queueID { continue }
-		// Only delivery attempts (skip qmgr active/removed lines)
-		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
-		if e.From != "" && e.From != "<>" && from == "" { from = e.From }
-		if e.To != "" && to == "" { to = e.To }
-		attempts = append(attempts, RetryAttempt{
-			Timestamp: e.Timestamp,
-			Status:    e.Status,
-			DSN:       e.DSN,
-			Relay:     e.Relay,
-			Message:   e.SMTPMsg,
-		})
-		if e.Status == "sent" || e.Status == "bounced" {
-			finalStatus = e.Status
+		var hit bool
+		if isQueueID {
+			hit = e.QueueID == q
+		} else {
+			hit = strings.Contains(strings.ToLower(e.To), q) ||
+				strings.Contains(strings.ToLower(e.From), q)
+		}
+		if !hit {
+			continue
+		}
+		jq := byQueue[e.QueueID]
+		if jq == nil {
+			if len(order) >= journeyMaxQueues {
+				truncated = true
+				break
+			}
+			jq = &JourneyQueue{QueueID: e.QueueID, From: s.queueFrom[e.QueueID]}
+			byQueue[e.QueueID] = jq
+			order = append(order, e.QueueID)
+		}
+		if e.From != "" && e.From != "<>" && jq.From == "" {
+			jq.From = e.From
+		}
+		if e.To != "" && jq.To == "" {
+			jq.To = e.To
+		}
+		kind := "log"
+		switch e.Status {
+		case "sent", "deferred", "bounced":
+			kind = "delivery"
+		case "active":
+			kind = "queued"
+		case "removed":
+			kind = "removed"
+		case "warned", "rejected":
+			kind = "policy"
+		}
+		if len(jq.Events) < journeyMaxEvents {
+			jq.Events = append(jq.Events, JourneyEvent{
+				Timestamp: e.Timestamp,
+				Kind:      kind,
+				Status:    e.Status,
+				DSN:       e.DSN,
+				Relay:     e.Relay,
+				Message:   e.SMTPMsg,
+			})
+		}
+		switch e.Status {
+		case "bounced", "sent":
+			jq.FinalStatus = e.Status
+		case "deferred":
+			if jq.FinalStatus == "" {
+				jq.FinalStatus = "deferred"
+			}
 		}
 	}
 
-	// Resolve from via queueFrom if missing
-	if from == "" {
-		from = s.queueFrom[queueID]
-	}
-	if finalStatus == "" && len(attempts) > 0 {
-		finalStatus = attempts[len(attempts)-1].Status
-	}
-
-	sort.Slice(attempts, func(i, j int) bool { return attempts[i].Timestamp < attempts[j].Timestamp })
-
-	// Fill in delayMs (gap since previous attempt)
-	for i := range attempts {
-		if i > 0 {
-			attempts[i].DelayMs = attempts[i].Timestamp - attempts[i-1].Timestamp
+	// Newest queue first (by first event)
+	sort.Slice(order, func(i, j int) bool {
+		a, b := byQueue[order[i]], byQueue[order[j]]
+		var ta, tb int64
+		if len(a.Events) > 0 {
+			ta = a.Events[0].Timestamp
 		}
+		if len(b.Events) > 0 {
+			tb = b.Events[0].Timestamp
+		}
+		return ta > tb
+	})
+	res.Queues = make([]JourneyQueue, 0, len(order))
+	for _, id := range order {
+		jq := byQueue[id]
+		sort.Slice(jq.Events, func(i, j int) bool { return jq.Events[i].Timestamp < jq.Events[j].Timestamp })
+		res.Queues = append(res.Queues, *jq)
 	}
+	res.Truncated = truncated
+	return res
+}
 
-	return RetryTimeline{
-		QueueID:     queueID,
-		From:        from,
-		To:          to,
-		Attempts:    attempts,
-		FinalStatus: finalStatus,
-	}
+// getMessagesByBucket returns all delivery attempts whose taxonomy bucket matches.
+// status = "deferred" | "bounced"
+func (s *logStore) computeMessagesByBucket(bucket, status string, since int64) []ReasonMessage {
+	return s.matchMessages(since, func(e *ParsedLogEntry) bool {
+		if e.Status != status {
+			return false
+		}
+		if e.Status == "deferred" {
+			return e.DeferBucket == bucket
+		}
+		return e.BounceBucket == bucket
+	})
 }
 
 // getTopDeferredQueues returns queue IDs with the most deferred attempts (for retry timeline UI).
-func (s *logStore) getTopDeferredQueues(since int64, limit int) []string {
+func (s *logStore) computeTopDeferredQueues(since int64, limit int) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	counts := make(map[string]int)
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
-		if e.Status == "deferred" { counts[e.QueueID]++ }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
+		if e.Status == "deferred" {
+			counts[e.QueueID]++
+		}
 	}
 
-	type kv struct{ id string; n int }
+	type kv struct {
+		id string
+		n  int
+	}
 	var sorted []kv
-	for id, n := range counts { sorted = append(sorted, kv{id, n}) }
+	for id, n := range counts {
+		sorted = append(sorted, kv{id, n})
+	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].n > sorted[j].n })
 
 	out := make([]string, 0, limit)
 	for i, kv := range sorted {
-		if i >= limit { break }
+		if i >= limit {
+			break
+		}
 		out = append(out, kv.id)
 	}
 	return out
@@ -1284,16 +1828,16 @@ func (s *logStore) getTopDeferredQueues(since int64, limit int) []string {
 
 // ── Queue Summary ──────────────────────────────────────────────────────────
 
-func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSummary {
+func (s *logStore) computeQueueSummaries(since int64, filterFrom string) []QueueSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	type acc struct {
-		firstSeen int64
-		from      string
-		tos       map[string]struct{}
-		size      int64
-		nrcpt               int
+		firstSeen               int64
+		from                    string
+		tos                     map[string]struct{}
+		size                    int64
+		nrcpt                   int
 		sent, deferred, bounced int
 	}
 
@@ -1301,16 +1845,24 @@ func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSumm
 
 	for i := range s.logs {
 		e := &s.logs[i]
-		if since > 0 && e.Timestamp < since { continue }
-		if s.isNDR(e) { continue }
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		if s.isNDR(e) {
+			continue
+		}
 
 		// Resolve sender
 		from := e.From
 		if (from == "" || from == "<>") && e.QueueID != "" {
 			from = s.queueFrom[e.QueueID]
 		}
-		if from == "" || from == "<>" { continue }
-		if filterFrom != "" && from != filterFrom { continue }
+		if from == "" || from == "<>" {
+			continue
+		}
+		if filterFrom != "" && from != filterFrom {
+			continue
+		}
 
 		q := queues[e.QueueID]
 		if q == nil {
@@ -1318,31 +1870,54 @@ func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSumm
 			queues[e.QueueID] = q
 		}
 
-		if q.firstSeen == 0 || e.Timestamp < q.firstSeen { q.firstSeen = e.Timestamp }
-		if q.from == "" { q.from = from }
-		if e.To != "" { q.tos[e.To] = struct{}{} }
-		if e.Size > 0 && q.size == 0 { q.size = e.Size }
-		if e.Nrcpt > 0 && q.nrcpt == 0 { q.nrcpt = e.Nrcpt }
+		if q.firstSeen == 0 || e.Timestamp < q.firstSeen {
+			q.firstSeen = e.Timestamp
+		}
+		if q.from == "" {
+			q.from = from
+		}
+		if e.To != "" {
+			q.tos[e.To] = struct{}{}
+		}
+		if e.Size > 0 && q.size == 0 {
+			q.size = e.Size
+		}
+		if e.Nrcpt > 0 && q.nrcpt == 0 {
+			q.nrcpt = e.Nrcpt
+		}
 
 		switch e.Status {
-		case "sent":     q.sent++
-		case "deferred": q.deferred++
-		case "bounced":  q.bounced++
+		case "sent":
+			q.sent++
+		case "deferred":
+			q.deferred++
+		case "bounced":
+			q.bounced++
 		}
 	}
 
 	out := make([]QueueSummary, 0, len(queues))
 	for qid, q := range queues {
-		if q.firstSeen == 0 { continue }
+		if q.firstSeen == 0 {
+			continue
+		}
 		tos := make([]string, 0, len(q.tos))
-		for t := range q.tos { tos = append(tos, t) }
+		for t := range q.tos {
+			tos = append(tos, t)
+		}
 		sort.Strings(tos)
 
 		// finalStatus: last-write-wins gives priority sent > bounced > deferred > unknown.
 		finalStatus := "unknown"
-		if q.deferred > 0 { finalStatus = "deferred" }
-		if q.bounced > 0  { finalStatus = "bounced" }
-		if q.sent > 0     { finalStatus = "sent" }
+		if q.deferred > 0 {
+			finalStatus = "deferred"
+		}
+		if q.bounced > 0 {
+			finalStatus = "bounced"
+		}
+		if q.sent > 0 {
+			finalStatus = "sent"
+		}
 
 		out = append(out, QueueSummary{
 			Timestamp:   q.firstSeen,
@@ -1361,4 +1936,402 @@ func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSumm
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
 	return out
+}
+
+// ──────────────────────────────────────────────
+// warn_if_reject monitor — RCPT-stage policy aggregation
+// ──────────────────────────────────────────────
+
+// getWarnInsights aggregates RCPT-stage policy events (warn_if_reject
+// downgrades + hard NOQUEUE rejects) — the evidence base for the
+// warn→enforce flip decision on reject_unknown_recipient_domain.
+func (s *logStore) computeWarnInsights(since int64) WarnInsights {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := WarnInsights{
+		TopWarnDomains:     []WarnDomainStat{},
+		TopRejectedDomains: []WarnDomainStat{},
+		Hourly:             []WarnHourly{},
+		Reasons:            []DeferReason{},
+		Recent:             []WarnEvent{},
+	}
+
+	type domAgg struct {
+		warned, rejected int
+		rcpts            map[string]struct{}
+		lastSeen         int64
+	}
+	warnDoms := map[string]*domAgg{}
+	rejDoms := map[string]*domAgg{}
+	rcptSet := map[string]struct{}{}
+	clientSet := map[string]struct{}{}
+	hourly := map[int64]*WarnHourly{}
+	reasons := map[string]int{}
+	var events []WarnEvent
+
+	for i := range s.logs {
+		e := &s.logs[i]
+		if e.Status != "warned" && e.Status != "rejected" {
+			continue
+		}
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		kind := e.Status
+		dom := extractDomain(e.To)
+		aggs := warnDoms
+		if kind == "rejected" {
+			aggs = rejDoms
+		}
+		da := aggs[dom]
+		if da == nil {
+			da = &domAgg{rcpts: map[string]struct{}{}}
+			aggs[dom] = da
+		}
+		if kind == "warned" {
+			da.warned++
+			out.Total++
+		} else {
+			da.rejected++
+			out.RejectedTotal++
+		}
+		da.rcpts[e.To] = struct{}{}
+		if e.Timestamp > da.lastSeen {
+			da.lastSeen = e.Timestamp
+		}
+		if e.To != "" {
+			rcptSet[e.To] = struct{}{}
+		}
+		if e.Relay != "" {
+			clientSet[e.Relay] = struct{}{}
+		}
+		if out.FirstSeen == 0 || e.Timestamp < out.FirstSeen {
+			out.FirstSeen = e.Timestamp
+		}
+		if e.Timestamp > out.LastSeen {
+			out.LastSeen = e.Timestamp
+		}
+		// Local clock hour in ms — see getVolumeInsights for why not Truncate().
+		lt := time.UnixMilli(e.Timestamp).Local()
+		h := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, lt.Location()).UnixMilli()
+		hb := hourly[h]
+		if hb == nil {
+			hb = &WarnHourly{Hour: h}
+			hourly[h] = hb
+		}
+		if kind == "warned" {
+			hb.Warned++
+		} else {
+			hb.Rejected++
+		}
+		if kind == "warned" {
+			reasons[normalizeWarnReason(e.SMTPMsg)]++
+		}
+		events = append(events, WarnEvent{
+			Timestamp: e.Timestamp,
+			Client:    e.Relay,
+			To:        e.To,
+			From:      e.From,
+			Domain:    dom,
+			DSN:       e.DSN,
+			Reason:    e.SMTPMsg,
+			Kind:      kind,
+		})
+	}
+
+	out.UniqueRecipients = len(rcptSet)
+	out.UniqueDomains = len(warnDoms)
+	out.UniqueClients = len(clientSet)
+
+	flatten := func(m map[string]*domAgg) []WarnDomainStat {
+		arr := make([]WarnDomainStat, 0, len(m))
+		for d, a := range m {
+			arr = append(arr, WarnDomainStat{
+				Domain: d, Warned: a.warned, Rejected: a.rejected,
+				UniqueRCPTs: len(a.rcpts), LastSeen: a.lastSeen,
+			})
+		}
+		sort.Slice(arr, func(i, j int) bool {
+			ti, tj := arr[i].Warned+arr[i].Rejected, arr[j].Warned+arr[j].Rejected
+			if ti != tj {
+				return ti > tj
+			}
+			return arr[i].Domain < arr[j].Domain
+		})
+		if len(arr) > 50 {
+			arr = arr[:50]
+		}
+		return arr
+	}
+	out.TopWarnDomains = flatten(warnDoms)
+	out.TopRejectedDomains = flatten(rejDoms)
+
+	for _, hb := range hourly {
+		out.Hourly = append(out.Hourly, *hb)
+	}
+	sort.Slice(out.Hourly, func(i, j int) bool { return out.Hourly[i].Hour < out.Hourly[j].Hour })
+
+	grandTotal := 0
+	for _, c := range reasons {
+		grandTotal += c
+	}
+	for r, c := range reasons {
+		pct := 0.0
+		if grandTotal > 0 {
+			pct = math.Round(float64(c)/float64(grandTotal)*1000) / 10
+		}
+		out.Reasons = append(out.Reasons, DeferReason{Reason: r, Count: c, Percent: pct})
+	}
+	sort.Slice(out.Reasons, func(i, j int) bool { return out.Reasons[i].Count > out.Reasons[j].Count })
+	if len(out.Reasons) > 15 {
+		out.Reasons = out.Reasons[:15]
+	}
+
+	sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp > events[j].Timestamp })
+	if len(events) > 200 {
+		events = events[:200]
+	}
+	out.Recent = events
+
+	return out
+}
+
+// normalizeWarnReason strips the generic prefix so reasons rank by their
+// distinguishing suffix ("Domain not found", "need fully-qualified address",
+// "unrouteable internal-only TLD", …).
+func normalizeWarnReason(msg string) string {
+	if at := strings.Index(msg, "rejected: "); at >= 0 {
+		return strings.TrimSpace(msg[at+len("rejected: "):])
+	}
+	return strings.TrimSpace(msg)
+}
+
+// ──────────────────────────────────────────────
+// Generation-keyed query cache
+// ──────────────────────────────────────────────
+// computeX bodies below are the full-store scans. Each getX wrapper serves
+// results from queryCache when the store generation is unchanged, so repeated
+// tab mounts / refreshes don't rescan the whole store.
+
+func cacheKey(gen uint64, name string, args []any) string {
+	key := fmt.Sprintf("%d|%s", gen, name)
+	for _, a := range args {
+		if str, ok := a.(string); ok {
+			key += fmt.Sprintf("|%q", str) // %q so "a|b","c" can't collide with "a","b|c"
+		} else {
+			key += fmt.Sprintf("|%v", a)
+		}
+	}
+	return key
+}
+
+func queryCacheGet[T any](s *logStore, name string, args []any) (T, bool) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	v, ok := s.queryCache[cacheKey(s.queryGen.Load(), name, args)]
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	return v.(T), true
+}
+
+func queryCacheStore[T any](s *logStore, gen uint64, name string, args []any, res T) {
+	if s.queryGen.Load() != gen {
+		return // store changed mid-scan — don't pollute the new generation
+	}
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.queryCache[cacheKey(gen, name, args)] = res
+}
+
+func (s *logStore) getMetrics(since int64) Metrics {
+	if v, ok := queryCacheGet[Metrics](s, "getMetrics", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeMetrics(since)
+	queryCacheStore(s, gen, "getMetrics", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
+	if v, ok := queryCacheGet[VolumeInsights](s, "getVolumeInsights", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeVolumeInsights(since)
+	queryCacheStore(s, gen, "getVolumeInsights", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getDelayInsights(since int64) DelayInsights {
+	if v, ok := queryCacheGet[DelayInsights](s, "getDelayInsights", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeDelayInsights(since)
+	queryCacheStore(s, gen, "getDelayInsights", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getRecipientDrilldown(domain string, since int64) RecipientDrilldown {
+	if v, ok := queryCacheGet[RecipientDrilldown](s, "getRecipientDrilldown", []any{domain, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeRecipientDrilldown(domain, since)
+	queryCacheStore(s, gen, "getRecipientDrilldown", []any{domain, since}, res)
+	return res
+}
+
+func (s *logStore) getQueueAgeDistribution(since int64) QueueAgeDistribution {
+	if v, ok := queryCacheGet[QueueAgeDistribution](s, "getQueueAgeDistribution", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeQueueAgeDistribution(since)
+	queryCacheStore(s, gen, "getQueueAgeDistribution", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getRelayInsights(since int64) RelayInsights {
+	if v, ok := queryCacheGet[RelayInsights](s, "getRelayInsights", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeRelayInsights(since)
+	queryCacheStore(s, gen, "getRelayInsights", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getGarbage(since int64) []GarbageRow {
+	if v, ok := queryCacheGet[[]GarbageRow](s, "getGarbage", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeGarbage(since)
+	queryCacheStore(s, gen, "getGarbage", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getRelayMessages(relay, status string, since int64) []RelayMessage {
+	if v, ok := queryCacheGet[[]RelayMessage](s, "getRelayMessages", []any{relay, status, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeRelayMessages(relay, status, since)
+	queryCacheStore(s, gen, "getRelayMessages", []any{relay, status, since}, res)
+	return res
+}
+
+func (s *logStore) getSenderStats(since int64) []SenderStat {
+	if v, ok := queryCacheGet[[]SenderStat](s, "getSenderStats", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeSenderStats(since)
+	queryCacheStore(s, gen, "getSenderStats", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getMessagesByReason(reason, status string, since int64) []ReasonMessage {
+	if v, ok := queryCacheGet[[]ReasonMessage](s, "getMessagesByReason", []any{reason, status, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeMessagesByReason(reason, status, since)
+	queryCacheStore(s, gen, "getMessagesByReason", []any{reason, status, since}, res)
+	return res
+}
+
+func (s *logStore) getMessagesBySender(from, status string, since int64) []ReasonMessage {
+	if v, ok := queryCacheGet[[]ReasonMessage](s, "getMessagesBySender", []any{from, status, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeMessagesBySender(from, status, since)
+	queryCacheStore(s, gen, "getMessagesBySender", []any{from, status, since}, res)
+	return res
+}
+
+func (s *logStore) getIPReputationReport(since int64) IPReputationReport {
+	if v, ok := queryCacheGet[IPReputationReport](s, "getIPReputationReport", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeIPReputationReport(since)
+	queryCacheStore(s, gen, "getIPReputationReport", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getBlockEvents(ourIP, service string, since int64) []BlockEvent {
+	if v, ok := queryCacheGet[[]BlockEvent](s, "getBlockEvents", []any{ourIP, service, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeBlockEvents(ourIP, service, since)
+	queryCacheStore(s, gen, "getBlockEvents", []any{ourIP, service, since}, res)
+	return res
+}
+
+func (s *logStore) getHeatmap(since int64) []HeatmapCell {
+	if v, ok := queryCacheGet[[]HeatmapCell](s, "getHeatmap", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeHeatmap(since)
+	queryCacheStore(s, gen, "getHeatmap", []any{since}, res)
+	return res
+}
+
+func (s *logStore) getJourney(query string) JourneyResult {
+	if v, ok := queryCacheGet[JourneyResult](s, "getJourney", []any{query}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeJourney(query)
+	queryCacheStore(s, gen, "getJourney", []any{query}, res)
+	return res
+}
+
+func (s *logStore) getMessagesByBucket(bucket, status string, since int64) []ReasonMessage {
+	if v, ok := queryCacheGet[[]ReasonMessage](s, "getMessagesByBucket", []any{bucket, status, since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeMessagesByBucket(bucket, status, since)
+	queryCacheStore(s, gen, "getMessagesByBucket", []any{bucket, status, since}, res)
+	return res
+}
+
+func (s *logStore) getTopDeferredQueues(since int64, limit int) []string {
+	if v, ok := queryCacheGet[[]string](s, "getTopDeferredQueues", []any{since, limit}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeTopDeferredQueues(since, limit)
+	queryCacheStore(s, gen, "getTopDeferredQueues", []any{since, limit}, res)
+	return res
+}
+
+func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSummary {
+	if v, ok := queryCacheGet[[]QueueSummary](s, "getQueueSummaries", []any{since, filterFrom}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeQueueSummaries(since, filterFrom)
+	queryCacheStore(s, gen, "getQueueSummaries", []any{since, filterFrom}, res)
+	return res
+}
+
+func (s *logStore) getWarnInsights(since int64) WarnInsights {
+	if v, ok := queryCacheGet[WarnInsights](s, "getWarnInsights", []any{since}); ok {
+		return v
+	}
+	gen := s.queryGen.Load()
+	res := s.computeWarnInsights(since)
+	queryCacheStore(s, gen, "getWarnInsights", []any{since}, res)
+	return res
 }

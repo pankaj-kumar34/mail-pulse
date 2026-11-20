@@ -29,6 +29,12 @@ type ParsedLogEntry struct {
 	IsWarning bool            `json:"isWarning"`
 	Size      int64           `json:"size,omitempty"`  // from qmgr: size=N
 	Nrcpt     int             `json:"nrcpt,omitempty"` // from qmgr: nrcpt=N
+
+	// Precomputed at ingest so queries never re-run regex rules over RawLog.
+	DeferReason  string `json:"deferReason,omitempty"`
+	BounceReason string `json:"bounceReason,omitempty"`
+	DeferBucket  string `json:"deferBucket,omitempty"`
+	BounceBucket string `json:"bounceBucket,omitempty"`
 }
 
 type DomainCount struct {
@@ -62,7 +68,37 @@ type VolumeInsights struct {
 	Hourly         []HourlyVolume   `json:"hourly"`
 	DeferReasons   []DeferReason    `json:"deferReasons"`
 	BounceReasons  []DeferReason    `json:"bounceReasons"` // reuse same shape
+	DeferBuckets   []DeferReason    `json:"deferBuckets"`  // coarse taxonomy buckets
+	BounceBuckets  []DeferReason    `json:"bounceBuckets"`
 	FailingDomains []DomainDelivery `json:"failingDomains"`
+}
+
+// JourneyEvent is one event in a message's journey: a delivery attempt, a
+// queue transition, a RCPT-stage policy event, or an error/warning log line.
+type JourneyEvent struct {
+	Timestamp int64  `json:"timestamp"`
+	Kind      string `json:"kind"`   // "delivery" | "queued" | "removed" | "policy" | "log"
+	Status    string `json:"status"` // sent/deferred/bounced/removed/active/warned/rejected/error/warning
+	DSN       string `json:"dsn,omitempty"`
+	Relay     string `json:"relay,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// JourneyQueue groups a journey's events under one queue ID ("" = NOQUEUE
+// smtpd events that were rejected before a queue ID was assigned).
+type JourneyQueue struct {
+	QueueID     string         `json:"queueId"`
+	From        string         `json:"from"`
+	To          string         `json:"to"`
+	FinalStatus string         `json:"finalStatus"`
+	Events      []JourneyEvent `json:"events"`
+}
+
+// JourneyResult is the result of GetJourney: one search, all matching queues.
+type JourneyResult struct {
+	Query     string         `json:"query"`
+	Queues    []JourneyQueue `json:"queues"`
+	Truncated bool           `json:"truncated"` // more queues matched than returned
 }
 
 type TimeSeriesPoint struct {
@@ -129,6 +165,8 @@ type MessageRow struct {
 	Status      string  `json:"status"`      // final status: sent/deferred/bounced/removed/active
 	Delay       float64 `json:"delay"`       // seconds
 	ProcessTime float64 `json:"processTime"` // time from queue entry to final status (seconds)
+	DSN         string  `json:"dsn,omitempty"`
+	SMTPMsg     string  `json:"smtpMsg,omitempty"`
 }
 
 type PaginatedMessages struct {
@@ -164,6 +202,7 @@ type PaginatedQueue struct {
 	Entries    []MailQueueEntry `json:"entries"`
 	Pagination PaginationInfo   `json:"pagination"`
 	PodID      string           `json:"podId"`
+	Error      string           `json:"error,omitempty"` // fetch/parse failure — distinct from "queue is empty"
 }
 
 type SearchMatch struct {
@@ -238,6 +277,7 @@ type PollNewLinesResult struct {
 	Lines    []string `json:"lines"`
 	Total    int      `json:"total"`
 	NewCount int      `json:"newCount"`
+	Reset    bool     `json:"reset"` // file shrank (rotated) — clear cache and re-index
 }
 
 // RelayStat holds delivery stats for a single relay host.
@@ -306,25 +346,6 @@ type HeatmapCell struct {
 	Total     int    `json:"total"`
 }
 
-// RetryAttempt is one delivery attempt for a queue ID.
-type RetryAttempt struct {
-	Timestamp int64  `json:"timestamp"`
-	Status    string `json:"status"`
-	DSN       string `json:"dsn"`
-	Relay     string `json:"relay"`
-	Message   string `json:"message"`
-	DelayMs   int64  `json:"delayMs"` // time since previous attempt
-}
-
-// RetryTimeline is the full retry history for a queue ID.
-type RetryTimeline struct {
-	QueueID   string         `json:"queueId"`
-	From      string         `json:"from"`
-	To        string         `json:"to"`
-	Attempts  []RetryAttempt `json:"attempts"`
-	FinalStatus string       `json:"finalStatus"`
-}
-
 // QueueSummary is a per-queue-ID summary: one row per queue, with all recipients aggregated.
 type QueueSummary struct {
 	Timestamp    int64    `json:"timestamp"`    // first seen
@@ -344,4 +365,67 @@ type PaginatedQueueSummaries struct {
 	Rows         []QueueSummary `json:"rows"`
 	Pagination   PaginationInfo `json:"pagination"`
 	UnknownCount int            `json:"unknownCount"` // queues with no delivery outcome (truncated log)
+}
+
+// ──────────────────────────────────────────────
+// warn_if_reject monitor — RCPT-stage policy data
+// ──────────────────────────────────────────────
+
+// WarnEvent is a single RCPT-stage policy event from postfix/smtpd:
+// either a warn_if_reject downgrade (mail accepted, would-be-rejected)
+// or a hard NOQUEUE reject at RCPT (table checks, enforced checks).
+type WarnEvent struct {
+	Timestamp int64  `json:"timestamp"` // unix ms
+	Client    string `json:"client,omitempty"`
+	To        string `json:"to,omitempty"`
+	From      string `json:"from,omitempty"`
+	Domain    string `json:"domain,omitempty"`
+	DSN       string `json:"dsn,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Kind      string `json:"kind"` // "warned" | "rejected"
+}
+
+// WarnDomainStat aggregates RCPT-stage events for one recipient domain.
+type WarnDomainStat struct {
+	Domain      string `json:"domain"`
+	Warned      int    `json:"warned"`
+	Rejected    int    `json:"rejected"`
+	UniqueRCPTs int    `json:"uniqueRcpts"`
+	LastSeen    int64  `json:"lastSeen"`
+}
+
+// WarnHourly is one hourly bucket of warned-RCPT volume.
+type WarnHourly struct {
+	Hour  int64 `json:"hour"` // unix ms of hour start
+	Warned int  `json:"warned"`
+	Rejected int `json:"rejected"`
+}
+
+// DomainDNSStatus is a live DNS verdict for a warned domain: the D1
+// flip-decision signal. nxdomain = safe garbage; a-only = postfix would
+// still deliver via A fallback; ok = has MX (transient or DNS recovered);
+// tempfail = resolver trouble, inconclusive.
+type DomainDNSStatus struct {
+	Domain string `json:"domain"`
+	Status string `json:"status"` // "nxdomain" | "a-only" | "ok" | "tempfail"
+	HasMX  bool   `json:"hasMx"`
+	HasA   bool   `json:"hasA"`
+	Error  string `json:"error,omitempty"`
+}
+
+// WarnInsights aggregates warn_if_reject + RCPT-stage reject events —
+// the evidence base for the warn→enforce flip decision.
+type WarnInsights struct {
+	Total            int              `json:"total"`       // warned (accepted) events
+	RejectedTotal    int              `json:"rejectedTotal"` // hard RCPT-stage rejects
+	UniqueRecipients int              `json:"uniqueRecipients"`
+	UniqueDomains    int              `json:"uniqueDomains"`
+	UniqueClients    int              `json:"uniqueClients"`
+	FirstSeen        int64            `json:"firstSeen"`
+	LastSeen         int64            `json:"lastSeen"`
+	TopWarnDomains   []WarnDomainStat `json:"topWarnDomains"`
+	TopRejectedDomains []WarnDomainStat `json:"topRejectedDomains"`
+	Hourly           []WarnHourly     `json:"hourly"`
+	Reasons          []DeferReason    `json:"reasons"` // warned reasons (reuses shape)
+	Recent           []WarnEvent      `json:"recent"`  // newest 200, warned + rejected
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, X } from "lucide-react";
 import { LogService } from "../../bindings/github.com/pankajkumar/mail-pulse";
 import { EmptyState } from "./EmptyState";
+import { dsnExplain } from "../lib/dsn";
 
 interface ReasonMessage {
   timestamp: number;
@@ -101,7 +102,7 @@ export function ReasonDrilldownPanel({ reason, status, sinceHours, onClose, titl
                     }}>{r.status}</span>
                   </td>
                   <td style={{ padding: "6px 12px", whiteSpace: "nowrap" }}>
-                    <span style={{ padding: "1px 6px", borderRadius: "4px", background: "#f4f4f5", fontFamily: "monospace", fontSize: "10px", color: "#71717a" }}>{r.dsn || "—"}</span>
+                    <span title={dsnExplain(r.dsn)} style={{ cursor: "help", padding: "1px 6px", borderRadius: "4px", background: "#f4f4f5", fontFamily: "monospace", fontSize: "10px", color: "#71717a" }}>{r.dsn || "—"}</span>
                   </td>
                   <td style={{ padding: "6px 12px", color: "#52525b", maxWidth: "260px" }}>
                     <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.message}>{r.message || "—"}</span>

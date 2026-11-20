@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -270,7 +271,29 @@ func TestDownloadAndInstallUpdate_ChecksumMismatch(t *testing.T) {
 	}
 }
 
+// Regression: a checksums file that doesn't list the asset must fail, not install unverified.
+func TestVerifyAssetChecksum_UnlistedAssetFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "asset.bin")
+	if err := os.WriteFile(path, []byte("payload"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	updater := NewUpdaterService()
+	updater.HTTPClient = newTestHTTPClient(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintf(w, "%s  some-other-asset.tar.gz\n", strings.Repeat("b", 64))
+	})
+	err := updater.verifyAssetChecksum(path, "mail-pulse.tar.gz", "https://example.com/checksums.txt")
+	if err == nil || !strings.Contains(err.Error(), "not listed") {
+		t.Fatalf("expected not-listed error, got: %v", err)
+	}
+}
+
 func TestParseTranslocatedOriginFromMount(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		// The function is only called on darwin (resolveMacAppTranslocation), and
+		// filepath.Clean mangles POSIX paths on Windows — the fixture is macOS-only.
+		t.Skip("macOS App Translocation paths only exist on darwin")
+	}
 	mountOut := `/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
 /Users/test/Downloads/Mail Pulse.app on /private/var/folders/xx/yy/T/AppTranslocation/1234-ABCD/d/Mail Pulse.app (apfs, local, nodev, nosuid, read-only)`
 

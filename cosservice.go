@@ -337,24 +337,43 @@ func (c *COSService) DownloadLogs(sourceName, bucketName, date string, keys []st
 		}
 	}
 
-	// Merge
+	// Merged file carries the date so repeated downloads can never clobber the
+	// user's own mail.log in ~/.mail-pulse/logs/.
+	safeDate := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '.', r == '_':
+			return r
+		}
+		return '_'
+	}, date)
+	mergedName := "merged-" + safeDate + ".log"
+	mergedPath := filepath.Join(dlDir, mergedName)
+
+	// Merge — sort reads the files directly; no shell, so config-sourced
+	// source/bucket/date names can't be interpreted as shell syntax.
 	c.setStatus("merging", "Merging log files…")
-	mergedPath := filepath.Join(dlDir, "mail.log")
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("cat '%s'/mail.*.log | sort -M -k1 -k2 -k3 > '%s'", dlDir, mergedPath))
-	if out, err := cmd.CombinedOutput(); err != nil {
+	logFiles, err := filepath.Glob(filepath.Join(dlDir, "mail.*.log"))
+	if err != nil || len(logFiles) == 0 {
+		c.setStatus("error", "no mail.*.log files found to merge")
+		return fmt.Errorf("no mail.*.log files found to merge")
+	}
+	args := append([]string{"-M", "-k1", "-k2", "-k3"}, logFiles...)
+	args = append(args, "-o", mergedPath)
+	if out, err := exec.Command("sort", args...).CombinedOutput(); err != nil {
 		c.setStatus("error", fmt.Sprintf("merge failed: %v: %s", err, string(out)))
 		return err
 	}
 
-	// Copy to ~/.mail-pulse/logs/ — merged mail.log + individual pod logs
+	// Copy to ~/.mail-pulse/logs/ — merged log + individual pod logs
 	logsDir := filepath.Join(home, ".mail-pulse", "logs")
 	if err := os.MkdirAll(logsDir, 0755); err != nil {
 		c.setStatus("error", err.Error())
 		return err
 	}
 
-	// Copy merged mail.log
-	destPath := filepath.Join(logsDir, "mail.log")
+	// Copy merged log
+	destPath := filepath.Join(logsDir, mergedName)
 	if err := copyFile(mergedPath, destPath); err != nil {
 		c.setStatus("error", fmt.Sprintf("copy to logs dir: %v", err))
 		return err
@@ -363,7 +382,7 @@ func (c *COSService) DownloadLogs(sourceName, bucketName, date string, keys []st
 	// Copy individual pod log files (mail.0.log, mail.1.log, etc.)
 	entries, _ := os.ReadDir(dlDir)
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") || e.Name() == "mail.log" {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") || e.Name() == mergedName {
 			continue
 		}
 		src := filepath.Join(dlDir, e.Name())
@@ -374,10 +393,10 @@ func (c *COSService) DownloadLogs(sourceName, bucketName, date string, keys []st
 	// Auto-load
 	c.setStatus("loading", "Loading into Mail Pulse…")
 	c.logSvc.mu.Lock()
-	c.logSvc.selectedFile = "mail.log"
+	c.logSvc.selectedFile = mergedName
 	c.logSvc.ingested = false
 	c.logSvc.mu.Unlock()
-	c.logSvc.store.clear()
+	c.logSvc.abortAndClear()
 	result := c.logSvc.IngestFile()
 	if result["ingested"] != true {
 		msg := fmt.Sprintf("ingest: %v", result["status"])

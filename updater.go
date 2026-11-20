@@ -422,8 +422,9 @@ func (u *UpdaterService) verifyAssetChecksum(filePath string, assetName string, 
 
 	expectedHash := parseChecksumForAsset(string(body), assetName)
 	if expectedHash == "" {
-		// Asset not listed in checksums file; do not fail if checksums file doesn't list this specific file
-		return nil
+		// A checksums file was provided but doesn't list this asset — treat as
+		// unverified rather than installing anyway.
+		return fmt.Errorf("%s not listed in checksums file; refusing unverified install", assetName)
 	}
 
 	actualHash, err := computeFileSHA256(filePath)

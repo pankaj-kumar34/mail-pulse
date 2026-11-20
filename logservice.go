@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
-	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -48,41 +51,61 @@ func (idx *lineIndex) build(path string) error {
 
 	var offset int64
 	buf := bufio.NewReaderSize(f, 256*1024)
-	idx.offsets = append(idx.offsets, 0) // first line starts at 0
+	if info.Size() > 0 {
+		idx.offsets = append(idx.offsets, 0) // first line starts at 0
+	}
 	for {
 		line, err := buf.ReadBytes('\n')
 		offset += int64(len(line))
 		if err != nil {
 			break
 		}
-		idx.offsets = append(idx.offsets, offset)
+		// offset == size means the file ended with '\n' — no line starts there
+		if offset < info.Size() {
+			idx.offsets = append(idx.offsets, offset)
+		}
 	}
 	return nil
 }
 
 // extend appends any new lines written since last index build.
-func (idx *lineIndex) extend(path string) (int, error) {
+// Returns reset=true when the file shrank (rotated/truncated) and the index
+// was rebuilt from scratch — callers must re-fetch instead of appending.
+func (idx *lineIndex) extend(path string) (int, bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	idx.mu.RLock()
 	currentSize := idx.fileSize
 	idx.mu.RUnlock()
 
-	if info.Size() <= currentSize {
-		return 0, nil
+	if info.Size() == currentSize {
+		return 0, false, nil
+	}
+	if info.Size() < currentSize {
+		// Rotated/truncated — offsets all point past EOF now. Rebuild.
+		if err := idx.build(path); err != nil {
+			return 0, true, err
+		}
+		return 0, true, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(currentSize, io.SeekStart); err != nil {
-		return 0, err
+	// A line starts at currentSize only if the previous content ended with '\n';
+	// otherwise that byte is mid-line and its start is already indexed.
+	prevEndsLine := true
+	if currentSize > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], currentSize-1); err == nil {
+			prevEndsLine = last[0] == '\n'
+		}
 	}
 
 	idx.mu.Lock()
@@ -90,11 +113,15 @@ func (idx *lineIndex) extend(path string) (int, error) {
 
 	added := 0
 	offset := currentSize
+	if prevEndsLine {
+		idx.offsets = append(idx.offsets, offset)
+		added++
+	}
 	buf := bufio.NewReaderSize(f, 64*1024)
 	for {
 		line, err := buf.ReadBytes('\n')
 		offset += int64(len(line))
-		if len(line) > 0 && err == nil {
+		if len(line) > 0 && err == nil && offset < info.Size() {
 			idx.offsets = append(idx.offsets, offset)
 			added++
 		}
@@ -103,7 +130,7 @@ func (idx *lineIndex) extend(path string) (int, error) {
 		}
 	}
 	idx.fileSize = info.Size()
-	return added, nil
+	return added, false, nil
 }
 
 func (idx *lineIndex) totalLines() int {
@@ -360,7 +387,9 @@ func (l *LogService) runIngest(gen int) error {
 		line := strings.TrimSpace(string(raw))
 		if line != "" {
 			if e := parsePostfixLogWithState(line, &prevMonth, &yearOffset); e != nil {
-				l.store.add(e)
+				if !l.addIfCurrent(gen, e) {
+					return fmt.Errorf("superseded") // another ingest started
+				}
 			}
 		}
 		if fileSize > 0 {
@@ -403,13 +432,9 @@ func (l *LogService) StartIngest() map[string]interface{} {
 			l.mu.Lock()
 			l.ingested = true
 			l.mu.Unlock()
-			// Pre-compute queue summaries for all time windows so GetQueueSummaries is O(1).
+			// Warm the query cache for the summary windows so GetQueueSummaries is O(1).
 			for _, hours := range []int{0, 1, 6, 24} {
-				since := int64(0)
-				if hours > 0 {
-					since = l.store.maxTimestamp() - int64(hours)*3600000
-				}
-				l.store.setCachedSummaries(hours, l.store.getQueueSummaries(since, ""))
+				l.store.getQueueSummaries(l.since(hours), "")
 			}
 		}
 		l.istate.finish(gen, errMsg)
@@ -452,6 +477,31 @@ func (l *LogService) IngestFile() map[string]interface{} {
 	return map[string]interface{}{"ingested": true, "status": "complete", "selectedFile": sel}
 }
 
+// abortAndClear bumps the ingest generation and empties the store under one lock
+// (istate.mu → store.mu) so a superseded ingest can never add stale lines to the
+// freshly cleared store — its check+add pair in addIfCurrent shares this ordering.
+func (l *LogService) abortAndClear() {
+	l.istate.mu.Lock()
+	defer l.istate.mu.Unlock()
+	l.store.mu.Lock()
+	defer l.store.mu.Unlock()
+	l.istate.gen++
+	l.store.clearLocked()
+}
+
+// addIfCurrent adds e only while gen is still the live ingest generation.
+func (l *LogService) addIfCurrent(gen int, e *ParsedLogEntry) bool {
+	l.istate.mu.Lock()
+	defer l.istate.mu.Unlock()
+	if l.istate.gen != gen {
+		return false
+	}
+	l.store.mu.Lock()
+	l.store.addLocked(e)
+	l.store.mu.Unlock()
+	return true
+}
+
 // ResetForFile switches the selected file and clears the store so a fresh
 // ingest can start. Call StartIngest() afterwards.
 func (l *LogService) ResetForFile(filename string) {
@@ -462,7 +512,7 @@ func (l *LogService) ResetForFile(filename string) {
 	}
 	l.ingested = false
 	l.mu.Unlock()
-	l.store.clear()
+	l.abortAndClear()
 }
 
 // RefreshFile resets the selected file and starts an async ingest.
@@ -474,140 +524,91 @@ func (l *LogService) RefreshFile(filename string) map[string]interface{} {
 
 // ── Metrics & Insights ────────────────────────────────────────────────────────
 
-func (l *LogService) GetMetrics(sinceHours int) Metrics {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+// since converts a sinceHours window (0 = all time) to an epoch-ms cutoff.
+func (l *LogService) since(sinceHours int) int64 {
+	if sinceHours <= 0 {
+		return 0
 	}
+	return l.store.maxTimestamp() - int64(sinceHours)*3600000
+}
+
+func (l *LogService) GetMetrics(sinceHours int) Metrics {
+	since := l.since(sinceHours)
 	return l.store.getMetrics(since)
 }
 
 func (l *LogService) GetVolumeInsights(sinceHours int) VolumeInsights {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getVolumeInsights(since)
 }
 
 func (l *LogService) GetDelayInsights(sinceHours int) DelayInsights {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getDelayInsights(since)
 }
 
 // GetLogTimeRange returns the earliest and latest timestamps (unix ms) in the loaded log.
+// O(1) — min/max are maintained on add().
 func (l *LogService) GetLogTimeRange() map[string]int64 {
-	l.store.mu.RLock()
-	defer l.store.mu.RUnlock()
-	var minTs, maxTs int64
-	for i := range l.store.logs {
-		ts := l.store.logs[i].Timestamp
-		if ts == 0 { continue }
-		if minTs == 0 || ts < minTs { minTs = ts }
-		if ts > maxTs               { maxTs = ts }
-	}
+	minTs, maxTs := l.store.timeRange()
 	return map[string]int64{"min": minTs, "max": maxTs}
 }
 
 // ── Data Access ───────────────────────────────────────────────────────────────
 
-func (l *LogService) GetActivity(sinceHours, page, limit int, search, status, sortBy, sortOrder string) PaginatedLogs {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
-	return l.store.getPaginated(since, page, limit, search, status, sortBy, sortOrder)
-}
-
 func (l *LogService) GetMessages(sinceHours, page, limit int, search, status, sortBy, sortOrder string) PaginatedMessages {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getMessages(since, page, limit, search, status, sortBy, sortOrder)
 }
 
 func (l *LogService) GetErrors(sinceHours, page, limit int, errType, sortOrder string) PaginatedLogs {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getErrorsPaginated(since, page, limit, errType, sortOrder)
 }
 
 func (l *LogService) GetRecipientDrilldown(domain string, sinceHours int) RecipientDrilldown {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getRecipientDrilldown(domain, since)
 }
 
 func (l *LogService) GetQueueAgeDistribution(sinceHours int) QueueAgeDistribution {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getQueueAgeDistribution(since)
 }
 
 func (l *LogService) GetRelayInsights(sinceHours int) RelayInsights {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getRelayInsights(since)
 }
 
 func (l *LogService) GetRelayMessages(relay, status string, sinceHours int) []RelayMessage {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getRelayMessages(relay, status, since)
 }
 
+func (l *LogService) GetGarbage(sinceHours int) []GarbageRow {
+	since := l.since(sinceHours)
+	return l.store.getGarbage(since)
+}
+
 func (l *LogService) GetSenderStats(sinceHours int) []SenderStat {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getSenderStats(since)
 }
 
 func (l *LogService) GetMessagesByReason(reason, status string, sinceHours int) []ReasonMessage {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getMessagesByReason(reason, status, since)
 }
 
 func (l *LogService) GetMessagesBySender(from, status string, sinceHours int) []ReasonMessage {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getMessagesBySender(from, status, since)
 }
 
 func (l *LogService) GetIPReputationReport(sinceHours int) IPReputationReport {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getIPReputationReport(since)
-}
-
-func (l *LogService) GetBlockEvents(ourIP, service string, sinceHours int) []BlockEvent {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
-	return l.store.getBlockEvents(ourIP, service, since)
 }
 
 // GetBlockEventsSince returns block events for a single (IP, service) pair whose
@@ -725,6 +726,7 @@ func (l *LogService) SearchLines(filename, query string, matchOffset, limit int)
 }
 
 // PollNewLines checks for new lines appended since last index and returns them.
+// reset=true means the file shrank (rotation) and was re-indexed — clear state and refetch.
 func (l *LogService) PollNewLines(filename string) PollNewLinesResult {
 	if filename == "" {
 		filename = l.selectedFile
@@ -737,8 +739,14 @@ func (l *LogService) PollNewLines(filename string) PollNewLinesResult {
 	path := filepath.Join(l.logsDir, filename)
 	prevTotal := l.lineIdx.totalLines()
 
-	added, err := l.lineIdx.extend(path)
-	if err != nil || added == 0 {
+	added, reset, err := l.lineIdx.extend(path)
+	if err != nil {
+		return PollNewLinesResult{Lines: []string{}, Total: prevTotal}
+	}
+	if reset {
+		return PollNewLinesResult{Lines: []string{}, Total: l.lineIdx.totalLines(), Reset: true}
+	}
+	if added == 0 {
 		return PollNewLinesResult{Lines: []string{}, Total: prevTotal}
 	}
 
@@ -746,124 +754,26 @@ func (l *LogService) PollNewLines(filename string) PollNewLinesResult {
 	return PollNewLinesResult{Lines: result.Lines, Total: result.Total, NewCount: added}
 }
 
-// GetRawLog returns the last 5000 lines of the file as a single string.
-func (l *LogService) GetRawLog(filename string) string {
-	if filename == "" {
-		filename = l.selectedFile
-	}
-	path := filepath.Join(l.logsDir, filename)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	const maxLines = 5000
-	const chunkSize = int64(512 * 1024)
-
-	info, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	fileSize := info.Size()
-
-	var buf []byte
-	offset := fileSize
-	lines := 0
-
-	for offset > 0 && lines < maxLines+1 {
-		read := chunkSize
-		if offset < read { read = offset }
-		offset -= read
-
-		chunk := make([]byte, read)
-		if _, err := f.ReadAt(chunk, offset); err != nil {
-			break
-		}
-		buf = append(chunk, buf...)
-		lines = bytes.Count(buf, []byte("\n"))
-	}
-
-	result := buf
-	if lines > maxLines {
-		count := 0
-		idx := len(result)
-		for idx > 0 {
-			idx--
-			if result[idx] == '\n' {
-				count++
-				if count == maxLines {
-					result = result[idx+1:]
-					break
-				}
-			}
-		}
-	}
-	return string(result)
-}
-
-// GetRawLogFrom returns lines appended after byteOffset and the new file size.
-func (l *LogService) GetRawLogFrom(filename string, byteOffset int64) map[string]interface{} {
-	if filename == "" {
-		filename = l.selectedFile
-	}
-	path := filepath.Join(l.logsDir, filename)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return map[string]interface{}{"lines": "", "offset": byteOffset, "reset": false}
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return map[string]interface{}{"lines": "", "offset": byteOffset, "reset": false}
-	}
-	fileSize := info.Size()
-
-	if fileSize < byteOffset {
-		return map[string]interface{}{"lines": "", "offset": int64(0), "reset": true}
-	}
-	if fileSize == byteOffset {
-		return map[string]interface{}{"lines": "", "offset": byteOffset, "reset": false}
-	}
-
-	const maxRead = int64(512 * 1024)
-	newBytes := fileSize - byteOffset
-	if newBytes > maxRead { newBytes = maxRead }
-
-	buf := make([]byte, newBytes)
-	if _, err = f.ReadAt(buf, byteOffset); err != nil {
-		return map[string]interface{}{"lines": "", "offset": byteOffset, "reset": false}
-	}
-
-	newOffset := byteOffset + newBytes
-	return map[string]interface{}{
-		"lines":  string(buf),
-		"offset": newOffset,
-		"reset":  false,
-		"more":   newOffset < fileSize,
-	}
-}
-
 func (l *LogService) GetHeatmap(sinceHours int) []HeatmapCell {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getHeatmap(since)
 }
 
-func (l *LogService) GetRetryTimeline(queueID string) RetryTimeline {
-	return l.store.getRetryTimeline(queueID)
+// GetJourney resolves a queue ID (or recipient/sender substring) and returns
+// the full event timeline for every matching queue — the message journey view.
+func (l *LogService) GetJourney(query string) JourneyResult {
+	return l.store.getJourney(query)
+}
+
+// GetMessagesByBucket returns all deferred/bounced attempts in a taxonomy bucket
+// ("Block / reputation", "Hard bounce", "Soft / temporary", "Connection / network", "Other").
+func (l *LogService) GetMessagesByBucket(bucket, status string, sinceHours int) []ReasonMessage {
+	since := l.since(sinceHours)
+	return l.store.getMessagesByBucket(bucket, status, since)
 }
 
 func (l *LogService) GetTopDeferredQueues(sinceHours, limit int) []string {
-	since := int64(0)
-	if sinceHours > 0 {
-		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-	}
+	since := l.since(sinceHours)
 	return l.store.getTopDeferredQueues(since, limit)
 }
 
@@ -875,18 +785,8 @@ func (l *LogService) GetQueueSummaries(sinceHours, page, limit int, filterFrom, 
 		limit = 100
 	}
 
-	// Pull full slice — from cache (O(1)) or on-demand fallback.
-	var all []QueueSummary
-	if filterFrom == "" {
-		all = l.store.getCachedSummaries(sinceHours)
-	}
-	if all == nil {
-		since := int64(0)
-		if sinceHours > 0 {
-			since = l.store.maxTimestamp() - int64(sinceHours)*3600000
-		}
-		all = l.store.getQueueSummaries(since, filterFrom)
-	}
+	// Pull full slice — cached (O(1) when pre-warmed at ingest-end) or computed on demand.
+	all := l.store.getQueueSummaries(l.since(sinceHours), filterFrom)
 
 	// Count unknowns across the full dataset (before status filter) so the
 	// frontend can show a rotation banner without needing to scan all pages.
@@ -898,8 +798,9 @@ func (l *LogService) GetQueueSummaries(sinceHours, page, limit int, filterFrom, 
 	}
 
 	// Apply status filter server-side so pagination is correct per-filter.
+	// Copy, never compact in place — `all` is the shared cached slice.
 	if statusFilter != "" {
-		filtered := all[:0]
+		filtered := make([]QueueSummary, 0, len(all))
 		for i := range all {
 			if all[i].FinalStatus == statusFilter {
 				filtered = append(filtered, all[i])
@@ -935,4 +836,73 @@ func (l *LogService) GetQueueSummaries(sinceHours, page, limit int, filterFrom, 
 			HasPrev:    page > 1,
 		},
 	}
+}
+
+// ──────────────────────────────────────────────
+// warn_if_reject monitor
+// ──────────────────────────────────────────────
+
+// GetWarnInsights returns RCPT-stage policy data — warn_if_reject downgrades
+// plus hard NOQUEUE rejects — for the warn→enforce flip decision.
+func (l *LogService) GetWarnInsights(sinceHours int) WarnInsights {
+	since := l.since(sinceHours)
+	return l.store.getWarnInsights(since)
+}
+
+// CheckWarnDomains runs live DNS (MX then A) lookups for the given warned
+// domains. Status: nxdomain = still-dead garbage (safe to enforce),
+// a-only = no MX but A fallback exists (postfix would still deliver),
+// ok = live MX (transient warning or recovered — flip risk),
+// tempfail = resolver trouble, inconclusive.
+func (l *LogService) CheckWarnDomains(domains []string) []DomainDNSStatus {
+	out := make([]DomainDNSStatus, 0, len(domains))
+	for _, dom := range domains {
+		out = append(out, checkDomainDNS(dom))
+	}
+	return out
+}
+
+func checkDomainDNS(domain string) DomainDNSStatus {
+	st := DomainDNSStatus{Domain: domain}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	mx, err := net.DefaultResolver.LookupMX(ctx, domain)
+	if err == nil && len(mx) > 0 {
+		st.HasMX = true
+		st.Status = "ok"
+		return st
+	}
+
+	// No MX (or MX lookup failed) — postfix falls back to A; check it too.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	ips, aerr := net.DefaultResolver.LookupIPAddr(ctx2, domain)
+	if aerr == nil && len(ips) > 0 {
+		st.HasA = true
+		st.Status = "a-only"
+		return st
+	}
+
+	isNotFound := func(e error) bool {
+		var dnsErr *net.DNSError
+		return errors.As(e, &dnsErr) && dnsErr.IsNotFound
+	}
+	switch {
+	case isNotFound(err) && (aerr == nil || isNotFound(aerr)):
+		// Truthfully dead: nothing in DNS at all.
+		st.Status = "nxdomain"
+	case isNotFound(err) && aerr != nil && !isNotFound(aerr):
+		// MX gone, but A lookup failed for another reason — inconclusive.
+		st.Status = "tempfail"
+		st.Error = aerr.Error()
+	default:
+		st.Status = "tempfail"
+		if err != nil {
+			st.Error = err.Error()
+		} else if aerr != nil {
+			st.Error = aerr.Error()
+		}
+	}
+	return st
 }

@@ -99,13 +99,13 @@ func (m *MailQueueService) GetQueue(page, limit int, search, queue, sortBy, sort
 
 	body, err := m.fetchMailq(ctx)
 	if err != nil {
-		return PaginatedQueue{}
+		return PaginatedQueue{Error: err.Error()}
 	}
 	defer body.Close()
 
 	podID, entries, err := parseMailqStream(body)
 	if err != nil {
-		return PaginatedQueue{}
+		return PaginatedQueue{Error: err.Error()}
 	}
 
 	// Filter — preallocated to capacity of entries; single append per entry

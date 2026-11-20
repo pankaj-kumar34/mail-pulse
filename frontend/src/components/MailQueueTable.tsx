@@ -39,8 +39,15 @@ export function MailQueueTable({ refreshKey }: { refreshKey: number }) {
     setLoading(true); setQError(null);
     try {
       const r = await MailQueueService.GetQueue(page, 20, search, queue, sortBy, sortOrder) as any;
+      if (r?.error) {
+        // Backend failed to reach/parse the queue API — not the same as empty.
+        setQError(`Queue unavailable: ${r.error}`);
+        setEntries([]);
+        setPagination({ page: 1, limit: 20, total: 0, totalPages: 1, hasNext: false, hasPrev: false });
+        return;
+      }
       setEntries(r.entries ?? []);
-      setPagination(r.pagination ?? { page: 1, limit: 20, total: 0, totalPages: 0, hasNext: false, hasPrev: false });
+      setPagination(r.pagination ?? { page: 1, limit: 20, total: 0, totalPages: 1, hasNext: false, hasPrev: false });
     } catch (e) { setQError("Queue unavailable"); console.error(e); }
     finally { setLoading(false); }
   }, [search, queue, sortBy, sortOrder]);
@@ -109,7 +116,7 @@ export function MailQueueTable({ refreshKey }: { refreshKey: number }) {
             </tr>
           </thead>
           <tbody>
-            {loading ? (
+            {loading && entries.length === 0 ? (
               <tr><td colSpan={6} className="py-20 text-center">
                 <Loader2 className="w-5 h-5 animate-spin mx-auto" style={{ color: "#e4e4e7" }} />
               </td></tr>

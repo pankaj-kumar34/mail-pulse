@@ -40,7 +40,10 @@ func newLogStore() *logStore {
 func (s *logStore) add(e *ParsedLogEntry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.addLocked(e)
+}
 
+func (s *logStore) addLocked(e *ParsedLogEntry) {
 	if _, seen := s.seenIDs[e.ID]; seen {
 		return
 	}
@@ -69,6 +72,10 @@ func (s *logStore) add(e *ParsedLogEntry) {
 func (s *logStore) clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.clearLocked()
+}
+
+func (s *logStore) clearLocked() {
 	s.logs = nil
 	s.maxTs = 0
 	s.seenIDs = make(map[string]struct{})

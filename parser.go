@@ -24,6 +24,13 @@ var delaysPattern = regexp.MustCompile(`delays=([\d.]+)\/([\d.]+)\/([\d.]+)\/([\
 var sizePattern = regexp.MustCompile(`size=(\d+)`)
 var nrcptPattern = regexp.MustCompile(`nrcpt=(\d+)`)
 
+// RCPT-stage policy rejects from smtpd (NOQUEUE — no queue ID assigned):
+//   NOQUEUE: reject_warning: RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; from=<s> to=<r> proto=...
+//   NOQUEUE: reject:         RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; ...
+// reject_warning = warn_if_reject downgrade (mail accepted, would-be-rejected);
+// reject = enforced RCPT-stage rejection (bad_rcpt table, enforced DNS check, …).
+var rcptRejectPattern = regexp.MustCompile(`^NOQUEUE: (reject_warning|reject): RCPT from ([^\[:]+)(?:\[([^\]]*)\])?: (\d{3} \d\.\d\.\d+) <([^>]*)>: ([^;]+)`)
+
 // parsePostfixLog parses a single log line. For multi-line files spanning year boundaries,
 // use parsePostfixLogWithState which tracks month regression (Dec→Jan) to detect year crossings.
 func parsePostfixLog(rawLog string) *ParsedLogEntry {
@@ -35,7 +42,14 @@ func parsePostfixLog(rawLog string) *ParsedLogEntry {
 // yearOffset: pointer to cumulative year offset from base year, updated when Dec→Jan crossing detected.
 // Base year defaults to current UTC year; caller can pre-set yearOffset if file mtime suggests a different base.
 func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *ParsedLogEntry {
-	if !strings.Contains(rawLog, "postfix/qmgr[") &&
+	// RCPT-stage policy lines from smtpd: warn_if_reject downgrades and hard
+	// NOQUEUE rejects. Everything else from smtpd is ignored — admitting all
+	// smtpd traffic would flood the store with connect/disconnect noise.
+	isSmtpdPolicyLine := strings.Contains(rawLog, "postfix/smtpd[") &&
+		(strings.Contains(rawLog, "reject_warning: RCPT from") ||
+			strings.Contains(rawLog, "reject: RCPT from"))
+	if !isSmtpdPolicyLine &&
+		!strings.Contains(rawLog, "postfix/qmgr[") &&
 		!strings.Contains(rawLog, "postfix/smtp[") &&
 		!strings.Contains(rawLog, "postfix/error[") {
 		return nil
@@ -108,6 +122,35 @@ func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *P
 
 	if isError || isWarning {
 		entry.RawLog = rawLog
+	}
+
+	// RCPT-stage policy events (smtpd only): parse and return early — these
+	// lines never carry delivery fields (status/delay/size), and we must not
+	// run the generic delivery-line extraction on them.
+	if service == "smtpd" {
+		if m := rcptRejectPattern.FindStringSubmatch(message); m != nil {
+			entry.Status = "warned"
+			if m[1] == "reject" {
+				entry.Status = "rejected"
+			}
+			entry.Relay = m[2]
+			if m[3] != "" {
+				entry.Relay = m[2] + "[" + m[3] + "]"
+			}
+			entry.DSN = m[4]
+			entry.To = m[5]
+			entry.SMTPMsg = strings.TrimSpace(m[6])
+			entry.RawLog = rawLog
+			if fm := fromPattern.FindStringSubmatch(message); fm != nil {
+				if fm[1] == "" {
+					entry.From = "<>"
+				} else {
+					entry.From = fm[1]
+				}
+			}
+			return entry
+		}
+		return nil // smtpd line that looked like policy but isn't parseable
 	}
 
 	if m := queueIDPattern.FindStringSubmatch(message); m != nil {

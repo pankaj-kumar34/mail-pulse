@@ -607,3 +607,83 @@ func TestGetQueueAgeDistribution(t *testing.T) {
 		t.Errorf("MaxSecs = %v, want 7200", dist.MaxSecs)
 	}
 }
+
+// ──────────────────────────────────────────────
+// RCPT-stage policy lines: warn_if_reject + NOQUEUE reject
+// ──────────────────────────────────────────────
+
+func TestParseRejectWarning(t *testing.T) {
+	line := `Nov 20 10:15:32 relay01 postfix/smtpd[4711]: NOQUEUE: reject_warning: RCPT from relay02[10.20.30.40]: 554 5.7.1 <qa-fixture@dps.openpages.local>: Recipient address rejected: Domain not found; from=<test@acme.com> to=<qa-fixture@dps.openpages.local> proto=ESMTP helo=<qa-pod>`
+	e := parsePostfixLog(line)
+	if e == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if e.Status != "warned" {
+		t.Errorf("Status = %q, want %q", e.Status, "warned")
+	}
+	if e.To != "qa-fixture@dps.openpages.local" {
+		t.Errorf("To = %q", e.To)
+	}
+	if e.From != "test@acme.com" {
+		t.Errorf("From = %q", e.From)
+	}
+	if e.DSN != "554 5.7.1" {
+		t.Errorf("DSN = %q", e.DSN)
+	}
+	if e.SMTPMsg != "Recipient address rejected: Domain not found" {
+		t.Errorf("SMTPMsg = %q", e.SMTPMsg)
+	}
+	if e.Relay != "relay02[10.20.30.40]" {
+		t.Errorf("Relay = %q", e.Relay)
+	}
+	if e.QueueID != "" {
+		t.Errorf("QueueID = %q, want empty (NOQUEUE)", e.QueueID)
+	}
+	if e.IsWarning || e.IsError {
+		t.Error("warned entries must not pollute error/warning diagnostics")
+	}
+}
+
+func TestParseRcptStageHardReject(t *testing.T) {
+	line := `Nov 20 11:02:01 relay01 postfix/smtpd[4812]: NOQUEUE: reject: RCPT from relay02[10.20.30.40]: 554 5.7.1 <test-user@sanfran.net>: Recipient address rejected: recipient domain does not exist (SBL incident 2026-11); from=<x@y.com> to=<test-user@sanfran.net> proto=ESMTP helo=<h1>`
+	e := parsePostfixLog(line)
+	if e == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if e.Status != "rejected" {
+		t.Errorf("Status = %q, want %q", e.Status, "rejected")
+	}
+	if e.To != "test-user@sanfran.net" {
+		t.Errorf("To = %q", e.To)
+	}
+	if e.SMTPMsg != "Recipient address rejected: recipient domain does not exist (SBL incident 2026-11)" {
+		t.Errorf("SMTPMsg = %q", e.SMTPMsg)
+	}
+}
+
+func TestNonFqdnWarnNoBrackets(t *testing.T) {
+	// Bare hostname (no [ip]) and 504 DSN variant.
+	line := `Nov 20 09:00:00 relay01 postfix/smtpd[4900]: NOQUEUE: reject_warning: RCPT from qa-runner: 504 5.5.2 <user@localhost>: Recipient address rejected: need fully-qualified address; from=<a@b.com> to=<user@localhost> proto=SMTP`
+	e := parsePostfixLog(line)
+	if e == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if e.Status != "warned" || e.DSN != "504 5.5.2" {
+		t.Errorf("Status=%q DSN=%q", e.Status, e.DSN)
+	}
+	if e.Relay != "qa-runner" {
+		t.Errorf("Relay = %q, want bare hostname", e.Relay)
+	}
+}
+
+func TestSmtpdNonPolicyLinesStillDropped(t *testing.T) {
+	for _, line := range []string{
+		`Nov 20 10:00:00 relay01 postfix/smtpd[1234]: connect from relay02[10.20.30.40]`,
+		`Nov 20 10:00:01 relay01 postfix/smtpd[1234]: disconnect from relay02[10.20.30.40] ehlo=1 mail=1 rcpt=0/1 data=0/1 quit=1 commands=5/6`,
+		`Nov 20 10:00:00 relay01 postfix/smtpd[1234]: NOQUEUE: reject: CONNECT from relay02[10.20.30.40]: 554 5.7.1 Client host rejected: access denied; proto=SMTP`,
+	} {
+		if e := parsePostfixLog(line); e != nil {
+			t.Errorf("smtpd non-RCPT line should be dropped: %q → %+v", line, e)
+		}
+	}
+}

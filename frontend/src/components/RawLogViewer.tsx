@@ -132,6 +132,11 @@ export function RawLogViewer({ refreshKey, selectedFile }: Props) {
       if (!filename) return;
       try {
         const res = await LogService.PollNewLines(filename) as any;
+        if (res.reset) {
+          // File rotated/shrunk — index rebuilt server-side; start fresh.
+          indexFile(filename);
+          return;
+        }
         const newCount: number = res.newCount ?? 0;
         const newTotal: number = Number(res.total ?? 0);
         const newLines: string[] = res.lines ?? [];
@@ -142,7 +147,7 @@ export function RawLogViewer({ refreshKey, selectedFile }: Props) {
       } catch (e) { console.error(e); }
     }, 3000);
     return () => clearInterval(id);
-  }, []);
+  }, [indexFile]);
 
   // ── Virtual scroll list ───────────────────────────────────────────────────
   const scrollVirtualizer = useVirtualizer({

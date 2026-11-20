@@ -124,7 +124,10 @@ func (s *logStore) getVolumeInsights(since int64) VolumeInsights {
 		if since > 0 && e.Timestamp < since { continue }
 		if s.isNDR(e) { continue }
 
-		hour1 := time.UnixMilli(e.Timestamp).Local().Truncate(time.Hour).Unix()
+		// Bucket by local clock hour — Truncate() is UTC-epoch based and misaligns
+		// buckets by the sub-hour part of the local offset (e.g. IST +5:30 → :30 buckets).
+		lt := time.UnixMilli(e.Timestamp).Local()
+		hour1 := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, lt.Location()).Unix()
 		recip := extractDomain(e.To)
 		switch e.Status {
 		case "sent":
@@ -359,6 +362,7 @@ func (s *logStore) getMessages(since int64, page, limit int, search, statusFilte
 			QueueID: e.QueueID, Time: e.Timestamp,
 			From: from, To: e.To,
 			Status: e.Status, Delay: e.Delay, ProcessTime: processTime,
+			DSN: e.DSN, SMTPMsg: e.SMTPMsg,
 		}
 
 		if statusFilter != "" && row.Status != statusFilter { continue }
@@ -725,9 +729,9 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 		}
 	}
 
-	// blocking DSN prefixes — 5.7.x policy, 5.4.1 access denied, 5.x.x permanent
+	// Any 5.x.x permanent failure counts as a block (5.7 policy, 5.4.1 access denied, …).
 	isBlockDSN := func(dsn string) bool {
-		return strings.HasPrefix(dsn, "5.7") || dsn == "5.4.1" || strings.HasPrefix(dsn, "5.")
+		return strings.HasPrefix(dsn, "5.")
 	}
 
 	var throttling, blocking, healthy []RelayStat
@@ -780,9 +784,155 @@ func (s *logStore) getRelayInsights(since int64) RelayInsights {
 type RelayMessage struct {
 	Timestamp int64  `json:"timestamp"`
 	To        string `json:"to"`
+	From      string `json:"from"`
+	QueueID   string `json:"queueId"`
 	Status    string `json:"status"`
 	DSN       string `json:"dsn"`
 	Message   string `json:"message"`
+}
+
+// ── Garbage detection ─────────────────────────────────────────────────────────
+
+// GarbageRow is one flagged recipient with who sent to it and the delivery details.
+type GarbageRow struct {
+	To          string   `json:"to"`
+	Flags       []string `json:"flags"`
+	Senders     []string `json:"senders"`
+	Sent        int      `json:"sent"`
+	Deferred    int      `json:"deferred"`
+	Bounced     int      `json:"bounced"`
+	Relays      []string `json:"relays"`
+	LastSeen    int64    `json:"lastSeen"`
+	LastDSN     string   `json:"lastDsn"`
+	LastMessage string   `json:"lastMessage"`
+}
+
+// reservedTLDs — addresses on these can never reach a real mailbox (incident:
+// openpages.local / dps-poc uat fixtures).
+var reservedTLDs = []string{".local", ".internal", ".test", ".invalid", ".localhost", ".example", ".lan", ".corp", ".home", ".arpa"}
+
+// addrFlags returns why an address looks like garbage: reserved TLD,
+// random-looking localpart (QA fixture usernames), or — for bounce evidence —
+// user-unknown is flagged by the caller since it needs the DSN/message.
+func addrFlags(addr string) []string {
+	at := strings.LastIndex(addr, "@")
+	if at < 0 { return nil }
+	local, domain := addr[:at], strings.ToLower(addr[at+1:])
+	var flags []string
+	for _, t := range reservedTLDs {
+		if strings.HasSuffix(domain, t) {
+			flags = append(flags, "reserved-tld")
+			break
+		}
+	}
+	if looksRandom(local) {
+		flags = append(flags, "random-localpart")
+	}
+	return flags
+}
+
+// looksRandom heuristically flags fixture-style usernames: long, vowel-poor,
+// digit-heavy localparts like "xk7fj29dqmz". Triage signal, not proof.
+func looksRandom(s string) bool {
+	if len(s) < 10 { return false }
+	letters, vowels, digits, run, maxRun := 0, 0, 0, 0, 0
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case strings.ContainsRune("aeiouy", r):
+			vowels++; letters++; run = 0
+		case r >= '0' && r <= '9':
+			digits++; run = 0
+		case r >= 'a' && r <= 'z':
+			letters++; run++
+			if run > maxRun { maxRun = run }
+		default:
+			run = 0
+		}
+	}
+	return maxRun >= 6 || (digits >= 2 && vowels*4 < letters) || digits >= len(s)/2
+}
+
+// getGarbage returns delivery traffic to/from addresses flagged as garbage,
+// grouped per recipient, heaviest first.
+func (s *logStore) getGarbage(since int64) []GarbageRow {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	type acc struct {
+		row      GarbageRow
+		senders  map[string]struct{}
+		relays   map[string]struct{}
+		lastTs   int64
+	}
+	accs := make(map[string]*acc)
+
+	for i := range s.logs {
+		e := &s.logs[i]
+		if since > 0 && e.Timestamp < since { continue }
+		if s.isNDR(e) { continue }
+		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		if e.To == "" || e.To == "(undisclosed-recipients:)" { continue }
+
+		flags := addrFlags(e.To)
+		msgLow := strings.ToLower(e.SMTPMsg)
+		if e.Status == "bounced" && (e.DSN == "5.1.1" || strings.Contains(msgLow, "user unknown")) {
+			flags = append(flags, "user-unknown")
+		}
+		if len(flags) == 0 { continue }
+
+		a := accs[e.To]
+		if a == nil {
+			a = &acc{row: GarbageRow{To: e.To, Flags: flags}, senders: map[string]struct{}{}, relays: map[string]struct{}{}}
+			accs[e.To] = a
+		}
+		// merge flags from every hit (first hit may miss user-unknown evidence)
+		for _, f := range flags {
+			known := false
+			for _, hf := range a.row.Flags { if hf == f { known = true; break } }
+			if !known { a.row.Flags = append(a.row.Flags, f) }
+		}
+		if e.From != "" && e.From != "<>" {
+			if sf := addrFlags(e.From); len(sf) > 0 {
+				known := false
+				for _, hf := range a.row.Flags { if hf == "garbage-sender" { known = true; break } }
+				if !known { a.row.Flags = append(a.row.Flags, "garbage-sender") }
+			}
+		}
+		if e.From != "" {
+			a.senders[e.From] = struct{}{}
+		}
+		if e.Relay != "" && e.Relay != "none" {
+			a.relays[e.Relay] = struct{}{}
+		}
+		switch e.Status {
+		case "sent":     a.row.Sent++
+		case "deferred": a.row.Deferred++
+		case "bounced":  a.row.Bounced++
+		}
+		if e.Timestamp > a.lastTs {
+			a.lastTs = e.Timestamp
+			a.row.LastSeen = e.Timestamp
+			a.row.LastDSN = e.DSN
+			a.row.LastMessage = e.SMTPMsg
+		}
+	}
+
+	out := make([]GarbageRow, 0, len(accs))
+	for _, a := range accs {
+		a.row.Senders = make([]string, 0, len(a.senders))
+		for snd := range a.senders { a.row.Senders = append(a.row.Senders, snd) }
+		a.row.Relays = make([]string, 0, len(a.relays))
+		for r := range a.relays { a.row.Relays = append(a.row.Relays, r) }
+		sort.Strings(a.row.Senders)
+		out = append(out, a.row)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ti := out[i].Sent + out[i].Deferred + out[i].Bounced
+		tj := out[j].Sent + out[j].Deferred + out[j].Bounced
+		if ti != tj { return ti > tj }
+		return out[i].To < out[j].To
+	})
+	return out
 }
 
 // getRelayMessages returns all delivery attempts for a given relay+status.
@@ -799,9 +949,16 @@ func (s *logStore) getRelayMessages(relay, status string, since int64) []RelayMe
 		if e.Relay != relay { continue }
 		if status != "" && e.Status != status { continue }
 		if e.Status != "sent" && e.Status != "deferred" && e.Status != "bounced" { continue }
+		// delivery lines never carry from= — join it from the qmgr/pickup line via queue ID
+		from := e.From
+		if from == "" {
+			from = s.queueFrom[e.QueueID]
+		}
 		out = append(out, RelayMessage{
 			Timestamp: e.Timestamp,
 			To:        e.To,
+			From:      from,
+			QueueID:   e.QueueID,
 			Status:    e.Status,
 			DSN:       e.DSN,
 			Message:   e.SMTPMsg,
@@ -1361,4 +1518,173 @@ func (s *logStore) getQueueSummaries(since int64, filterFrom string) []QueueSumm
 
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp > out[j].Timestamp })
 	return out
+}
+
+// ──────────────────────────────────────────────
+// warn_if_reject monitor — RCPT-stage policy aggregation
+// ──────────────────────────────────────────────
+
+// getWarnInsights aggregates RCPT-stage policy events (warn_if_reject
+// downgrades + hard NOQUEUE rejects) — the evidence base for the
+// warn→enforce flip decision on reject_unknown_recipient_domain.
+func (s *logStore) getWarnInsights(since int64) WarnInsights {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := WarnInsights{
+		TopWarnDomains:     []WarnDomainStat{},
+		TopRejectedDomains: []WarnDomainStat{},
+		Hourly:             []WarnHourly{},
+		Reasons:            []DeferReason{},
+		Recent:             []WarnEvent{},
+	}
+
+	type domAgg struct {
+		warned, rejected int
+		rcpts            map[string]struct{}
+		lastSeen         int64
+	}
+	warnDoms := map[string]*domAgg{}
+	rejDoms := map[string]*domAgg{}
+	rcptSet := map[string]struct{}{}
+	clientSet := map[string]struct{}{}
+	hourly := map[int64]*WarnHourly{}
+	reasons := map[string]int{}
+	var events []WarnEvent
+
+	for i := range s.logs {
+		e := &s.logs[i]
+		if e.Status != "warned" && e.Status != "rejected" {
+			continue
+		}
+		if since > 0 && e.Timestamp < since {
+			continue
+		}
+		kind := e.Status
+		dom := extractDomain(e.To)
+		aggs := warnDoms
+		if kind == "rejected" {
+			aggs = rejDoms
+		}
+		da := aggs[dom]
+		if da == nil {
+			da = &domAgg{rcpts: map[string]struct{}{}}
+			aggs[dom] = da
+		}
+		if kind == "warned" {
+			da.warned++
+			out.Total++
+		} else {
+			da.rejected++
+			out.RejectedTotal++
+		}
+		da.rcpts[e.To] = struct{}{}
+		if e.Timestamp > da.lastSeen {
+			da.lastSeen = e.Timestamp
+		}
+		if e.To != "" {
+			rcptSet[e.To] = struct{}{}
+		}
+		if e.Relay != "" {
+			clientSet[e.Relay] = struct{}{}
+		}
+		if out.FirstSeen == 0 || e.Timestamp < out.FirstSeen {
+			out.FirstSeen = e.Timestamp
+		}
+		if e.Timestamp > out.LastSeen {
+			out.LastSeen = e.Timestamp
+		}
+		// Local clock hour in ms — see getVolumeInsights for why not Truncate().
+		lt := time.UnixMilli(e.Timestamp).Local()
+		h := time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, lt.Location()).UnixMilli()
+		hb := hourly[h]
+		if hb == nil {
+			hb = &WarnHourly{Hour: h}
+			hourly[h] = hb
+		}
+		if kind == "warned" {
+			hb.Warned++
+		} else {
+			hb.Rejected++
+		}
+		if kind == "warned" {
+			reasons[normalizeWarnReason(e.SMTPMsg)]++
+		}
+		events = append(events, WarnEvent{
+			Timestamp: e.Timestamp,
+			Client:    e.Relay,
+			To:        e.To,
+			From:      e.From,
+			Domain:    dom,
+			DSN:       e.DSN,
+			Reason:    e.SMTPMsg,
+			Kind:      kind,
+		})
+	}
+
+	out.UniqueRecipients = len(rcptSet)
+	out.UniqueDomains = len(warnDoms)
+	out.UniqueClients = len(clientSet)
+
+	flatten := func(m map[string]*domAgg) []WarnDomainStat {
+		arr := make([]WarnDomainStat, 0, len(m))
+		for d, a := range m {
+			arr = append(arr, WarnDomainStat{
+				Domain: d, Warned: a.warned, Rejected: a.rejected,
+				UniqueRCPTs: len(a.rcpts), LastSeen: a.lastSeen,
+			})
+		}
+		sort.Slice(arr, func(i, j int) bool {
+			ti, tj := arr[i].Warned+arr[i].Rejected, arr[j].Warned+arr[j].Rejected
+			if ti != tj {
+				return ti > tj
+			}
+			return arr[i].Domain < arr[j].Domain
+		})
+		if len(arr) > 50 {
+			arr = arr[:50]
+		}
+		return arr
+	}
+	out.TopWarnDomains = flatten(warnDoms)
+	out.TopRejectedDomains = flatten(rejDoms)
+
+	for _, hb := range hourly {
+		out.Hourly = append(out.Hourly, *hb)
+	}
+	sort.Slice(out.Hourly, func(i, j int) bool { return out.Hourly[i].Hour < out.Hourly[j].Hour })
+
+	grandTotal := 0
+	for _, c := range reasons {
+		grandTotal += c
+	}
+	for r, c := range reasons {
+		pct := 0.0
+		if grandTotal > 0 {
+			pct = math.Round(float64(c)/float64(grandTotal)*1000) / 10
+		}
+		out.Reasons = append(out.Reasons, DeferReason{Reason: r, Count: c, Percent: pct})
+	}
+	sort.Slice(out.Reasons, func(i, j int) bool { return out.Reasons[i].Count > out.Reasons[j].Count })
+	if len(out.Reasons) > 15 {
+		out.Reasons = out.Reasons[:15]
+	}
+
+	sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp > events[j].Timestamp })
+	if len(events) > 200 {
+		events = events[:200]
+	}
+	out.Recent = events
+
+	return out
+}
+
+// normalizeWarnReason strips the generic prefix so reasons rank by their
+// distinguishing suffix ("Domain not found", "need fully-qualified address",
+// "unrouteable internal-only TLD", …).
+func normalizeWarnReason(msg string) string {
+	if at := strings.Index(msg, "rejected: "); at >= 0 {
+		return strings.TrimSpace(msg[at+len("rejected: "):])
+	}
+	return strings.TrimSpace(msg)
 }

@@ -18,6 +18,8 @@ import {
   Users,
   Cloud,
   Sparkles,
+  ShieldAlert,
+  Trash2,
 } from "lucide-react";
 import {
   usePostfixLogs,
@@ -44,6 +46,8 @@ import { TopDomainsTable } from "./TopDomainsTable";
 import { RawLogViewer } from "./RawLogViewer";
 import { VolumeInsightsChart } from "./VolumeInsightsChart";
 import { RelayInsightsPanel } from "./RelayInsightsPanel";
+import { GarbagePanel } from "./GarbagePanel";
+import { WarnMonitorPanel } from "./WarnMonitorPanel";
 import LogSourcePanel from "./LogSourcePanel";
 import { NativeSelect } from "@/components/ui/select";
 
@@ -56,6 +60,8 @@ type Tab =
   | "qmgr"
   | "queue"
   | "relays"
+  | "garbage"
+  | "warnmonitor"
   | "errors"
   | "rawlog"
   | "logsource";
@@ -84,6 +90,8 @@ const NAV: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "qmgr", label: "Qmgr", icon: BarChart2 },
   { id: "queue", label: "Mail Queue", icon: Inbox },
   { id: "relays", label: "Relays", icon: Network },
+  { id: "garbage", label: "Garbage", icon: Trash2 },
+  { id: "warnmonitor", label: "Warn Monitor", icon: ShieldAlert },
   { id: "errors", label: "Diagnostics", icon: AlertCircle },
   { id: "rawlog", label: "Raw Log", icon: ScrollText },
   { id: "logsource", label: "Log Source", icon: Cloud },
@@ -98,6 +106,8 @@ const TAB_TITLE: Record<Tab, string> = {
   qmgr: "Queue Manager",
   queue: "Mail Queue",
   relays: "Relay Insights",
+  garbage: "Garbage Traffic",
+  warnmonitor: "warn_if_reject Monitor",
   errors: "Diagnostics",
   rawlog: "Raw Log",
   logsource: "Log Source",
@@ -215,14 +225,14 @@ export default function Dashboard() {
   return (
     <div
       className="flex overflow-hidden p-2.5 gap-2"
-      style={{ background: "#d8d8de", height: "100%" }}
+      style={{ background: "var(--content-canvas)", height: "100%" }}
     >
       {/* ── Sidebar panel ───────────────────────────────────────────────── */}
       <aside
         className="w-52.5 shrink-0 flex flex-col rounded-2xl overflow-hidden"
         style={{
-          background: "#1e1e20",
-          boxShadow: "inset 0 0 0 1px rgba(255,255,255,.07)",
+          background: "linear-gradient(180deg, #191c22 0%, #13151a 100%)",
+          boxShadow: "inset 0 0 0 1px rgba(255,255,255,.06)",
         }}
       >
         {/* macOS traffic light drag zone — sits above brand */}
@@ -237,7 +247,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-2.5">
               <div
                 className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-                style={{ background: "rgba(16,185,129,0.18)" }}
+                style={{ background: "rgba(16,185,129,0.2)", boxShadow: "0 0 14px rgba(16,185,129,.35), inset 0 0 0 1px rgba(16,185,129,.25)" }}
               >
                 <Mail className="w-3.5 h-3.5" style={{ color: "#10b981" }} />
               </div>
@@ -369,13 +379,15 @@ export default function Dashboard() {
           style={{ borderTop: "1px solid rgba(255,255,255,.08)" }}
         >
           <div className="flex items-center justify-between px-1">
-            <button
-              onClick={() => setIsUpdaterOpen(true)}
-              className="text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
-              title="Check for updates from GitHub Releases"
-            >
-              v{versionInfo?.version || "1.0.0"}
-            </button>
+            {updateCheckResult?.hasUpdate && (
+              <button
+                onClick={() => setIsUpdaterOpen(true)}
+                className="text-[11px] font-mono text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                title="Check for updates from GitHub Releases"
+              >
+                v{versionInfo?.version || "1.0.0"}
+              </button>
+            )}
             {updateCheckResult?.hasUpdate && (
               <button
                 onClick={() => setIsUpdaterOpen(true)}
@@ -405,19 +417,19 @@ export default function Dashboard() {
       {/* ── Content panel ──────────────────────────────────────────────── */}
       <div
         className="flex-1 flex flex-col overflow-hidden rounded-2xl"
-        style={{ background: "#f5f5f7", boxShadow: "none" }}
+        style={{ background: "var(--content-panel-bg)", boxShadow: "var(--shadow-panel)" }}
       >
         {/* Topbar */}
         <div
           className="shrink-0 h-13 flex items-center px-5 gap-3 bg-white"
           style={
             {
-              borderBottom: "1px solid #e4e4e7",
+              borderBottom: "1px solid var(--content-border)",
               WebkitAppRegion: "drag",
             } as React.CSSProperties
           }
         >
-          <h1 className="flex-1 text-[14px] font-semibold text-zinc-800">
+          <h1 className="flex-1 text-[15px] font-semibold tracking-[-0.01em] text-zinc-800">
             {TAB_TITLE[tab]}
           </h1>
 
@@ -678,6 +690,32 @@ export default function Dashboard() {
               style={{ display: tab === "relays" ? "flex" : "none" }}
             >
               <RelayInsightsPanel
+                sinceHours={sinceHours}
+                refreshKey={refreshKey}
+              />
+            </div>
+          )}
+
+          {/* Garbage — flagged recipients/senders */}
+          {mountedTabs.has("garbage") && (
+            <div
+              className="absolute inset-0 overflow-hidden flex flex-col"
+              style={{ display: tab === "garbage" ? "flex" : "none" }}
+            >
+              <GarbagePanel
+                sinceHours={sinceHours}
+                refreshKey={refreshKey}
+              />
+            </div>
+          )}
+
+          {/* warn_if_reject Monitor — RCPT-stage policy events */}
+          {mountedTabs.has("warnmonitor") && (
+            <div
+              className="absolute inset-0 overflow-hidden flex flex-col bg-zinc-50"
+              style={{ display: tab === "warnmonitor" ? "block" : "none" }}
+            >
+              <WarnMonitorPanel
                 sinceHours={sinceHours}
                 refreshKey={refreshKey}
               />

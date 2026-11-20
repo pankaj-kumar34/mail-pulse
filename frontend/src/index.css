@@ -3,21 +3,23 @@
 
 /* ─── Theme tokens — change ONE place to swap colors ─────────────────────── */
 :root {
-  /* Sidebar */
-  --sidebar-bg:        #1c1c1e;
-  --sidebar-border:    #2c2c2e;
-  --sidebar-text:      #a1a1aa;
+  /* Sidebar — dark, cool-tinted */
+  --sidebar-bg:        linear-gradient(180deg, #191c22 0%, #13151a 100%);
+  --sidebar-border:    #2a2d35;
+  --sidebar-text:      #9ba1ad;
   --sidebar-text-active: #ffffff;
-  --sidebar-item-active: #3a3a3c;
-  --sidebar-item-hover:  #2c2c2e;
+  --sidebar-item-active: #2b313b;
+  --sidebar-item-hover:  #23272f;
 
-  /* Content area */
-  --content-bg:        #f5f5f7;
-  --content-panel-bg:  #ffffff;
-  --content-border:    #e4e4e7;
-  --content-text:      #18181b;
-  --content-text-sub:  #71717a;
-  --content-text-mute: #a1a1aa;
+  /* Content area — cool grey family, one hue */
+  --content-bg:        #f6f7fa;
+  --content-panel-bg:  #fbfcfe;
+  --content-border:    #e6e8ef;
+  --content-text:      #161a21;
+  --content-text-sub:  #5d6470;
+  --content-text-mute: #99a0ac;
+  --content-canvas:    radial-gradient(1100px 420px at 15% -10%, rgba(16,185,129,0.11), transparent 62%),
+                       linear-gradient(180deg, #e9edf3 0%, #dde2eb 100%);
 
   /* Accent (emerald — swap to #3b82f6 for blue theme) */
   --accent:            #10b981;
@@ -40,11 +42,12 @@
   --c-blue-t:   #1e3a8a;
 
   /* Inputs / surfaces */
-  --input-bg:     #f4f4f5;
-  --input-border: #e4e4e7;
+  --input-bg:     #f4f5f8;
+  --input-border: #e2e5ec;
   --input-focus:  #10b981;
-  --shadow-sm:    0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
-  --shadow-card:  0 1px 4px rgba(0,0,0,.07), 0 0 0 1px rgba(0,0,0,.04);
+  --shadow-sm:    0 1px 3px rgba(18,22,33,.06), 0 1px 2px rgba(18,22,33,.04);
+  --shadow-card:  0 1px 2px rgba(18,22,33,.04), 0 4px 16px rgba(18,22,33,.06);
+  --shadow-panel: 0 0 0 1px rgba(255,255,255,.55), 0 2px 6px rgba(18,22,33,.05), 0 14px 36px rgba(18,22,33,.10);
 }
 
 /* ─── Reset ───────────────────────────────────────────────────────────────── */
@@ -89,6 +92,54 @@ button:disabled { cursor: not-allowed; }
   #root { zoom: 1.6;  height: calc(100vh / 1.6)  !important; }
 }
 
-/* ─── Scrollbar ───────────────────────────────────────────────────────────── */
-* { scrollbar-width: none; }
-*::-webkit-scrollbar { width: 0; height: 0; }
+/* ─── Interaction feel — one place, applies everywhere ────────────────────── */
+button, [role="button"] {
+  transition: transform .12s ease, background-color .16s ease,
+              border-color .16s ease, color .16s ease, box-shadow .16s ease;
+}
+button:active:not(:disabled) { transform: scale(.98); }
+
+:focus-visible {
+  outline: 2px solid rgba(16,185,129,.55);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+td, th { font-variant-numeric: tabular-nums; }
+
+/* Metric card — used by MetricCard.tsx */
+.mcard {
+  position: relative;
+  background: #ffffff;
+  border-radius: 14px;
+  border: 1px solid var(--content-border);
+  overflow: hidden;
+  transition: transform .18s cubic-bezier(.2,.8,.2,1), box-shadow .18s ease, border-color .18s ease;
+}
+.mcard::before {
+  /* status-colored top hairline, set per-card via --mcard-accent */
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--mcard-accent, transparent);
+}
+.mcard-click { cursor: pointer; }
+.mcard-click:hover {
+  transform: translateY(-2px);
+  border-color: #cdd4e0;
+  box-shadow: 0 10px 24px -8px rgba(18,22,33,.16), 0 2px 6px rgba(18,22,33,.05);
+}
+.mcard-click:active { transform: translateY(0) scale(.99); }
+
+/* ─── Scrollbar — thin overlay thumb instead of hidden ───────────────────── */
+* { scrollbar-width: thin; scrollbar-color: rgba(18,22,33,.22) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(18,22,33,.18);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: rgba(18,22,33,.32); }

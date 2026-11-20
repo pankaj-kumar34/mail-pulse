@@ -3,9 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -48,41 +52,61 @@ func (idx *lineIndex) build(path string) error {
 
 	var offset int64
 	buf := bufio.NewReaderSize(f, 256*1024)
-	idx.offsets = append(idx.offsets, 0) // first line starts at 0
+	if info.Size() > 0 {
+		idx.offsets = append(idx.offsets, 0) // first line starts at 0
+	}
 	for {
 		line, err := buf.ReadBytes('\n')
 		offset += int64(len(line))
 		if err != nil {
 			break
 		}
-		idx.offsets = append(idx.offsets, offset)
+		// offset == size means the file ended with '\n' — no line starts there
+		if offset < info.Size() {
+			idx.offsets = append(idx.offsets, offset)
+		}
 	}
 	return nil
 }
 
 // extend appends any new lines written since last index build.
-func (idx *lineIndex) extend(path string) (int, error) {
+// Returns reset=true when the file shrank (rotated/truncated) and the index
+// was rebuilt from scratch — callers must re-fetch instead of appending.
+func (idx *lineIndex) extend(path string) (int, bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	idx.mu.RLock()
 	currentSize := idx.fileSize
 	idx.mu.RUnlock()
 
-	if info.Size() <= currentSize {
-		return 0, nil
+	if info.Size() == currentSize {
+		return 0, false, nil
+	}
+	if info.Size() < currentSize {
+		// Rotated/truncated — offsets all point past EOF now. Rebuild.
+		if err := idx.build(path); err != nil {
+			return 0, true, err
+		}
+		return 0, true, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(currentSize, io.SeekStart); err != nil {
-		return 0, err
+	// A line starts at currentSize only if the previous content ended with '\n';
+	// otherwise that byte is mid-line and its start is already indexed.
+	prevEndsLine := true
+	if currentSize > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], currentSize-1); err == nil {
+			prevEndsLine = last[0] == '\n'
+		}
 	}
 
 	idx.mu.Lock()
@@ -90,11 +114,15 @@ func (idx *lineIndex) extend(path string) (int, error) {
 
 	added := 0
 	offset := currentSize
+	if prevEndsLine {
+		idx.offsets = append(idx.offsets, offset)
+		added++
+	}
 	buf := bufio.NewReaderSize(f, 64*1024)
 	for {
 		line, err := buf.ReadBytes('\n')
 		offset += int64(len(line))
-		if len(line) > 0 && err == nil {
+		if len(line) > 0 && err == nil && offset < info.Size() {
 			idx.offsets = append(idx.offsets, offset)
 			added++
 		}
@@ -103,7 +131,7 @@ func (idx *lineIndex) extend(path string) (int, error) {
 		}
 	}
 	idx.fileSize = info.Size()
-	return added, nil
+	return added, false, nil
 }
 
 func (idx *lineIndex) totalLines() int {
@@ -360,7 +388,9 @@ func (l *LogService) runIngest(gen int) error {
 		line := strings.TrimSpace(string(raw))
 		if line != "" {
 			if e := parsePostfixLogWithState(line, &prevMonth, &yearOffset); e != nil {
-				l.store.add(e)
+				if !l.addIfCurrent(gen, e) {
+					return fmt.Errorf("superseded") // another ingest started
+				}
 			}
 		}
 		if fileSize > 0 {
@@ -452,6 +482,31 @@ func (l *LogService) IngestFile() map[string]interface{} {
 	return map[string]interface{}{"ingested": true, "status": "complete", "selectedFile": sel}
 }
 
+// abortAndClear bumps the ingest generation and empties the store under one lock
+// (istate.mu → store.mu) so a superseded ingest can never add stale lines to the
+// freshly cleared store — its check+add pair in addIfCurrent shares this ordering.
+func (l *LogService) abortAndClear() {
+	l.istate.mu.Lock()
+	defer l.istate.mu.Unlock()
+	l.store.mu.Lock()
+	defer l.store.mu.Unlock()
+	l.istate.gen++
+	l.store.clearLocked()
+}
+
+// addIfCurrent adds e only while gen is still the live ingest generation.
+func (l *LogService) addIfCurrent(gen int, e *ParsedLogEntry) bool {
+	l.istate.mu.Lock()
+	defer l.istate.mu.Unlock()
+	if l.istate.gen != gen {
+		return false
+	}
+	l.store.mu.Lock()
+	l.store.addLocked(e)
+	l.store.mu.Unlock()
+	return true
+}
+
 // ResetForFile switches the selected file and clears the store so a fresh
 // ingest can start. Call StartIngest() afterwards.
 func (l *LogService) ResetForFile(filename string) {
@@ -462,7 +517,7 @@ func (l *LogService) ResetForFile(filename string) {
 	}
 	l.ingested = false
 	l.mu.Unlock()
-	l.store.clear()
+	l.abortAndClear()
 }
 
 // RefreshFile resets the selected file and starts an async ingest.
@@ -568,6 +623,14 @@ func (l *LogService) GetRelayMessages(relay, status string, sinceHours int) []Re
 		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
 	}
 	return l.store.getRelayMessages(relay, status, since)
+}
+
+func (l *LogService) GetGarbage(sinceHours int) []GarbageRow {
+	since := int64(0)
+	if sinceHours > 0 {
+		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+	}
+	return l.store.getGarbage(since)
 }
 
 func (l *LogService) GetSenderStats(sinceHours int) []SenderStat {
@@ -725,6 +788,7 @@ func (l *LogService) SearchLines(filename, query string, matchOffset, limit int)
 }
 
 // PollNewLines checks for new lines appended since last index and returns them.
+// reset=true means the file shrank (rotation) and was re-indexed — clear state and refetch.
 func (l *LogService) PollNewLines(filename string) PollNewLinesResult {
 	if filename == "" {
 		filename = l.selectedFile
@@ -737,8 +801,14 @@ func (l *LogService) PollNewLines(filename string) PollNewLinesResult {
 	path := filepath.Join(l.logsDir, filename)
 	prevTotal := l.lineIdx.totalLines()
 
-	added, err := l.lineIdx.extend(path)
-	if err != nil || added == 0 {
+	added, reset, err := l.lineIdx.extend(path)
+	if err != nil {
+		return PollNewLinesResult{Lines: []string{}, Total: prevTotal}
+	}
+	if reset {
+		return PollNewLinesResult{Lines: []string{}, Total: l.lineIdx.totalLines(), Reset: true}
+	}
+	if added == 0 {
 		return PollNewLinesResult{Lines: []string{}, Total: prevTotal}
 	}
 
@@ -935,4 +1005,76 @@ func (l *LogService) GetQueueSummaries(sinceHours, page, limit int, filterFrom, 
 			HasPrev:    page > 1,
 		},
 	}
+}
+
+// ──────────────────────────────────────────────
+// warn_if_reject monitor
+// ──────────────────────────────────────────────
+
+// GetWarnInsights returns RCPT-stage policy data — warn_if_reject downgrades
+// plus hard NOQUEUE rejects — for the warn→enforce flip decision.
+func (l *LogService) GetWarnInsights(sinceHours int) WarnInsights {
+	since := int64(0)
+	if sinceHours > 0 {
+		since = l.store.maxTimestamp() - int64(sinceHours)*3600000
+	}
+	return l.store.getWarnInsights(since)
+}
+
+// CheckWarnDomains runs live DNS (MX then A) lookups for the given warned
+// domains. Status: nxdomain = still-dead garbage (safe to enforce),
+// a-only = no MX but A fallback exists (postfix would still deliver),
+// ok = live MX (transient warning or recovered — flip risk),
+// tempfail = resolver trouble, inconclusive.
+func (l *LogService) CheckWarnDomains(domains []string) []DomainDNSStatus {
+	out := make([]DomainDNSStatus, 0, len(domains))
+	for _, dom := range domains {
+		out = append(out, checkDomainDNS(dom))
+	}
+	return out
+}
+
+func checkDomainDNS(domain string) DomainDNSStatus {
+	st := DomainDNSStatus{Domain: domain}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	mx, err := net.DefaultResolver.LookupMX(ctx, domain)
+	if err == nil && len(mx) > 0 {
+		st.HasMX = true
+		st.Status = "ok"
+		return st
+	}
+
+	// No MX (or MX lookup failed) — postfix falls back to A; check it too.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	ips, aerr := net.DefaultResolver.LookupIPAddr(ctx2, domain)
+	if aerr == nil && len(ips) > 0 {
+		st.HasA = true
+		st.Status = "a-only"
+		return st
+	}
+
+	isNotFound := func(e error) bool {
+		var dnsErr *net.DNSError
+		return errors.As(e, &dnsErr) && dnsErr.IsNotFound
+	}
+	switch {
+	case isNotFound(err) && (aerr == nil || isNotFound(aerr)):
+		// Truthfully dead: nothing in DNS at all.
+		st.Status = "nxdomain"
+	case isNotFound(err) && aerr != nil && !isNotFound(aerr):
+		// MX gone, but A lookup failed for another reason — inconclusive.
+		st.Status = "tempfail"
+		st.Error = aerr.Error()
+	default:
+		st.Status = "tempfail"
+		if err != nil {
+			st.Error = err.Error()
+		} else if aerr != nil {
+			st.Error = aerr.Error()
+		}
+	}
+	return st
 }

@@ -1045,6 +1045,25 @@ func addrFlags(addr string) []string {
 	return flags
 }
 
+func hasFlag(flags []string, want string) bool {
+	for _, f := range flags {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
+func removeFlag(flags []string, drop string) []string {
+	out := flags[:0]
+	for _, f := range flags {
+		if f != drop {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // looksRandom heuristically flags fixture-style usernames: long, vowel-poor,
 // digit-heavy localparts like "xk7fj29dqmz". Triage signal, not proof.
 func looksRandom(s string) bool {
@@ -1105,8 +1124,22 @@ func (s *logStore) computeGarbage(since int64) []GarbageRow {
 
 		flags := addrFlags(e.To)
 		msgLow := strings.ToLower(e.SMTPMsg)
-		if e.Status == "bounced" && (e.DSN == "5.1.1" || strings.Contains(msgLow, "user unknown")) {
+		unknown := e.Status == "bounced" && (e.DSN == "5.1.1" || strings.Contains(msgLow, "user unknown"))
+		if unknown {
 			flags = append(flags, "user-unknown")
+		} else {
+			// a 250/4xx means the mailbox wasn't proven dead — downgrade a pure shape guess to
+			// "unverified" instead of dropping it (catch-alls accept garbage, so silence ≠ real)
+			for i, f := range flags {
+				if f == "random-localpart" {
+					if len(flags) == 1 {
+						flags[i] = "unverified"
+					} else {
+						flags = append(flags[:i], flags[i+1:]...)
+					}
+					break
+				}
+			}
 		}
 		if len(flags) == 0 {
 			continue
@@ -1173,6 +1206,10 @@ func (s *logStore) computeGarbage(since int64) []GarbageRow {
 
 	out := make([]GarbageRow, 0, len(accs))
 	for _, a := range accs {
+		// a 5.1.1 bounce is proof — an "unverified" shape guess must not sit next to it
+		if hasFlag(a.row.Flags, "user-unknown") {
+			a.row.Flags = removeFlag(a.row.Flags, "unverified")
+		}
 		a.row.Senders = make([]string, 0, len(a.senders))
 		for snd := range a.senders {
 			a.row.Senders = append(a.row.Senders, snd)

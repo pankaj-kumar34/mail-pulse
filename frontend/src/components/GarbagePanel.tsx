@@ -15,6 +15,7 @@ const FLAG_STYLE: Record<string, { bg: string; fg: string; label: string }> = {
   "random-localpart": { bg: "#fffbeb", fg: "#d97706", label: "random username" },
   "user-unknown":     { bg: "#fef2f2", fg: "#dc2626", label: "user unknown" },
   "garbage-sender":   { bg: "#f5f3ff", fg: "#7c3aed", label: "garbage sender" },
+  "unverified":       { bg: "#f4f4f5", fg: "#71717a", label: "unverified" },
 };
 
 function Flag({ f }: { f: string }) {
@@ -70,6 +71,7 @@ export function GarbagePanel({ sinceHours, refreshKey }: { sinceHours: number; r
           <Flag f="reserved-tld" /> <span className="text-xs tabular-nums" style={{ color: "#71717a" }}>{countBy("reserved-tld")}</span>
           <Flag f="random-localpart" /> <span className="text-xs tabular-nums" style={{ color: "#71717a" }}>{countBy("random-localpart")}</span>
           <Flag f="user-unknown" /> <span className="text-xs tabular-nums" style={{ color: "#71717a" }}>{countBy("user-unknown")}</span>
+          <Flag f="unverified" /> <span className="text-xs tabular-nums" style={{ color: "#71717a" }}>{countBy("unverified")}</span>
         </div>
       </div>
 

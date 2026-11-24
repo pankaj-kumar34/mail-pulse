@@ -644,6 +644,41 @@ func TestParseRejectWarning(t *testing.T) {
 	}
 }
 
+func TestParseRejectWarningQueueIDChrooted(t *testing.T) {
+	// Live line from the test relay 2026-11-24: warn_if_reject ACCEPTED the mail,
+	// so the warning carries a real queue ID (not NOQUEUE) and a chrooted service
+	// name (mail-proxy/smtpd) — both previously unparsed (Warn Monitor showed nothing).
+	line := `Nov 24 03:34:03 mail postfix/mail-proxy/smtpd[104]: EDE018000B: reject_warning: RCPT from unknown[172.17.1.152]: 450 4.1.2 <test@warn-if-reject-test.xyz>: Recipient address rejected: Domain not found; from=<pankaj@mailx.event-notifications.test.cloud.ibm.com> to=<test@warn-if-reject-test.xyz> proto=ESMTP helo=<mail.event-notifications.test.cloud.ibm.com>`
+	e := parsePostfixLog(line)
+	if e == nil {
+		t.Fatal("expected entry, got nil")
+	}
+	if e.Status != "warned" {
+		t.Errorf("Status = %q, want %q", e.Status, "warned")
+	}
+	if e.QueueID != "EDE018000B" {
+		t.Errorf("QueueID = %q, want %q (accepted-after-warn lines carry a real queue ID)", e.QueueID, "EDE018000B")
+	}
+	if e.To != "test@warn-if-reject-test.xyz" {
+		t.Errorf("To = %q", e.To)
+	}
+	if e.From != "pankaj@mailx.event-notifications.test.cloud.ibm.com" {
+		t.Errorf("From = %q", e.From)
+	}
+	if e.DSN != "450 4.1.2" {
+		t.Errorf("DSN = %q", e.DSN)
+	}
+	if e.SMTPMsg != "Recipient address rejected: Domain not found" {
+		t.Errorf("SMTPMsg = %q", e.SMTPMsg)
+	}
+	if e.Relay != "unknown[172.17.1.152]" {
+		t.Errorf("Relay = %q", e.Relay)
+	}
+	if e.Service != "mail-proxy/smtpd" {
+		t.Errorf("Service = %q", e.Service)
+	}
+}
+
 func TestParseRcptStageHardReject(t *testing.T) {
 	line := `Nov 20 11:02:01 relay01 postfix/smtpd[4812]: NOQUEUE: reject: RCPT from relay02[10.20.30.40]: 554 5.7.1 <test-user@sanfran.net>: Recipient address rejected: recipient domain does not exist (SBL incident 2026-11); from=<x@y.com> to=<test-user@sanfran.net> proto=ESMTP helo=<h1>`
 	e := parsePostfixLog(line)

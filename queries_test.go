@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"reflect"
 	"testing"
 )
@@ -163,5 +164,29 @@ func TestGetGarbageSenderJoin(t *testing.T) {
 	}
 	if len(rows[0].Senders) != 1 || rows[0].Senders[0] != "app@corp.ibm.com" {
 		t.Errorf("senders = %v, want [app@corp.ibm.com] joined via queueFrom", rows[0].Senders)
+	}
+}
+
+func TestGetGarbageRandomLocalpartNeedsBounce(t *testing.T) {
+	s := newLogStore()
+	// real student-ID mailbox that delivered: shape guess downgraded to "unverified", not dropped
+	s.add(&ParsedLogEntry{ID: "a1", Service: "smtp", Timestamp: 1000, QueueID: "Q1", To: "2024693536@student.uitm.edu.my", Status: "sent"})
+	rows := s.getGarbage(0)
+	if len(rows) != 1 || !slices.Contains(rows[0].Flags, "unverified") {
+		t.Fatalf("delivered random-looking recipient: rows=%d flags=%v, want 1 row [unverified]", len(rows), rows[0].Flags)
+	}
+	// bounced 5.1.1 to a random-looking address: evidence upgrades it to random-localpart + user-unknown
+	s.add(&ParsedLogEntry{ID: "b1", Service: "smtp", Timestamp: 2000, QueueID: "Q2", To: "xk7fj29dqmz@corp.com", Status: "bounced", DSN: "5.1.1"})
+	rows = s.getGarbage(0)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.To != "xk7fj29dqmz@corp.com" {
+			continue
+		}
+		if !slices.Contains(r.Flags, "random-localpart") || !slices.Contains(r.Flags, "user-unknown") {
+			t.Errorf("flags = %v, want random-localpart + user-unknown", r.Flags)
+		}
 	}
 }

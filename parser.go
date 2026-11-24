@@ -24,12 +24,14 @@ var delaysPattern = regexp.MustCompile(`delays=([\d.]+)\/([\d.]+)\/([\d.]+)\/([\
 var sizePattern = regexp.MustCompile(`size=(\d+)`)
 var nrcptPattern = regexp.MustCompile(`nrcpt=(\d+)`)
 
-// RCPT-stage policy rejects from smtpd (NOQUEUE — no queue ID assigned):
-//   NOQUEUE: reject_warning: RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; from=<s> to=<r> proto=...
+// RCPT-stage policy rejects from smtpd (plain and chrooted service names like
+// mail-proxy/smtpd). Queue ID slot: NOQUEUE when nothing was queued; a real
+// queue ID when warn_if_reject accepted the mail after logging the warning.
+//   EDE018000B: reject_warning: RCPT from name[ip]: 450 4.1.2 <rcpt>: Reason; from=<s> to=<r> proto=...
 //   NOQUEUE: reject:         RCPT from name[ip]: 554 5.7.1 <rcpt>: Reason; ...
 // reject_warning = warn_if_reject downgrade (mail accepted, would-be-rejected);
 // reject = enforced RCPT-stage rejection (bad_rcpt table, enforced DNS check, …).
-var rcptRejectPattern = regexp.MustCompile(`^NOQUEUE: (reject_warning|reject): RCPT from ([^\[:]+)(?:\[([^\]]*)\])?: (\d{3} \d\.\d\.\d+) <([^>]*)>: ([^;]+)`)
+var rcptRejectPattern = regexp.MustCompile(`^(NOQUEUE|[A-F0-9]+): (reject_warning|reject): RCPT from ([^\[:]+)(?:\[([^\]]*)\])?: (\d{3} \d\.\d\.\d+) <([^>]*)>: ([^;]+)`)
 
 // parsePostfixLog parses a single log line. For multi-line files spanning year boundaries,
 // use parsePostfixLogWithState which tracks month regression (Dec→Jan) to detect year crossings.
@@ -45,7 +47,9 @@ func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *P
 	// RCPT-stage policy lines from smtpd: warn_if_reject downgrades and hard
 	// NOQUEUE rejects. Everything else from smtpd is ignored — admitting all
 	// smtpd traffic would flood the store with connect/disconnect noise.
-	isSmtpdPolicyLine := strings.Contains(rawLog, "postfix/smtpd[") &&
+	// "smtpd[" (not "postfix/smtpd[") also matches chrooted service names like
+	// postfix/mail-proxy/smtpd — the relay's dedicated listener for the proxy.
+	isSmtpdPolicyLine := strings.Contains(rawLog, "smtpd[") &&
 		(strings.Contains(rawLog, "reject_warning: RCPT from") ||
 			strings.Contains(rawLog, "reject: RCPT from"))
 	if !isSmtpdPolicyLine &&
@@ -127,19 +131,23 @@ func parsePostfixLogWithState(rawLog string, prevMonth *int, yearOffset *int) *P
 	// RCPT-stage policy events (smtpd only): parse and return early — these
 	// lines never carry delivery fields (status/delay/size), and we must not
 	// run the generic delivery-line extraction on them.
-	if service == "smtpd" {
+	// smtpd policy lines can run under chrooted service names (mail-proxy/smtpd).
+	if strings.HasSuffix(service, "smtpd") {
 		if m := rcptRejectPattern.FindStringSubmatch(message); m != nil {
 			entry.Status = "warned"
-			if m[1] == "reject" {
+			if m[2] == "reject" {
 				entry.Status = "rejected"
 			}
-			entry.Relay = m[2]
-			if m[3] != "" {
-				entry.Relay = m[2] + "[" + m[3] + "]"
+			if m[1] != "NOQUEUE" {
+				entry.QueueID = m[1]
 			}
-			entry.DSN = m[4]
-			entry.To = m[5]
-			entry.SMTPMsg = strings.TrimSpace(m[6])
+			entry.Relay = m[3]
+			if m[4] != "" {
+				entry.Relay = m[3] + "[" + m[4] + "]"
+			}
+			entry.DSN = m[5]
+			entry.To = m[6]
+			entry.SMTPMsg = strings.TrimSpace(m[7])
 			entry.RawLog = rawLog
 			if fm := fromPattern.FindStringSubmatch(message); fm != nil {
 				if fm[1] == "" {

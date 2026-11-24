@@ -107,7 +107,7 @@ const TAB_TITLE: Record<Tab, string> = {
   queue: "Mail Queue",
   relays: "Relay Insights",
   garbage: "Garbage Traffic",
-  warnmonitor: "warn_if_reject Monitor",
+  warnmonitor: "Warn Monitor",
   errors: "Diagnostics",
   rawlog: "Raw Log",
   logsource: "Log Source",
